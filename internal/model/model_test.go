@@ -58,8 +58,59 @@ func TestDedupKey(t *testing.T) {
 	if k1 == k3 {
 		t.Fatal("next minute should differ")
 	}
+	// Locked so existing rows keep matching. Material is
+	// 1850|CNY|美团外卖|2026-10-26T12:00:00Z.
+	const want = "77370374fe0de4b35f189dfedae554267dd605f07b421f72ac9544ea0469af5b"
+	if k1 != want {
+		t.Fatalf("dedup material changed: %s", k1)
+	}
+	distinct := MakeDistinctOrderDedupKey(1850, "CNY", "美团外卖", a, "wx-1")
+	if distinct == k1 || distinct == "" {
+		t.Fatalf("distinct order key = %s", distinct)
+	}
 	if got := NormalizeMerchant("  Foo   BAR "); got != "foo bar" {
 		t.Fatal(got)
+	}
+}
+
+func TestNormalizeOrderNo(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"  wx-4200 123 ", "WX4200123"},
+		{"ＷＸ－４２００", "WX4200"},
+		{"4200001234", "4200001234"},
+		{"无", ""},
+		{"N/A", ""},
+		{" none ", ""},
+		{"未知", ""},
+		{"", ""},
+		{"订单号", "订单号"},
+	}
+	for _, tc := range cases {
+		if got := NormalizeOrderNo(tc.in); got != tc.want {
+			t.Fatalf("%q: got %q want %q", tc.in, got, tc.want)
+		}
+	}
+	once := NormalizeOrderNo("  wx-4200 123 ")
+	if again := NormalizeOrderNo(once); again != once {
+		t.Fatalf("not idempotent: %q -> %q", once, again)
+	}
+}
+
+func TestSameLocalDayShanghai(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := time.Date(2026, 10, 26, 15, 30, 0, 0, time.UTC)  // 23:30 Oct 26 Shanghai
+	next := time.Date(2026, 10, 26, 16, 30, 0, 0, time.UTC)  // 00:30 Oct 27 Shanghai
+	early := time.Date(2026, 10, 25, 16, 30, 0, 0, time.UTC) // 00:30 Oct 26 Shanghai
+	if SameLocalDay(late, next, loc) {
+		t.Fatal("UTC evening and the next Shanghai midnight are different local days")
+	}
+	if !SameLocalDay(early, late, loc) {
+		t.Fatal("00:30 and 23:30 Shanghai are the same local day")
 	}
 }
 

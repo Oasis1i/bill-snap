@@ -42,6 +42,7 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	st.SetLocation(cfg.Location)
 
 	ex, err := extract.New(extract.Options{
 		Provider: cfg.VisionProvider,

@@ -23,17 +23,21 @@ type Extractor interface {
 // Result is the structured output of a vision pass.
 // Amount is major currency units as a decimal string ("18.50").
 // AmountCents is that value in minor units (fen, cents).
+// OrderNo is the normalized order or transaction number, or empty.
+// PaidAtDefaulted is true when the model omitted paid_at and PaidAt is the upload time.
 type Result struct {
-	IsBill      bool
-	Amount      string
-	AmountCents int64
-	Currency    string
-	Merchant    string
-	Category    string
-	PaidAt      time.Time
-	Confidence  float64
-	Notes       string
-	RawJSON     json.RawMessage
+	IsBill          bool
+	Amount          string
+	AmountCents     int64
+	Currency        string
+	Merchant        string
+	Category        string
+	PaidAt          time.Time
+	PaidAtDefaulted bool
+	OrderNo         string
+	Confidence      float64
+	Notes           string
+	RawJSON         json.RawMessage
 }
 
 // Options selects an implementation. An empty Provider means mock.

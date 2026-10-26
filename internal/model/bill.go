@@ -3,21 +3,26 @@ package model
 // Bill is one stored payment receipt.
 // Amount is major units as a decimal string ("18.50"). AmountCents is minor units.
 // PaidAt, CreatedAt, and UpdatedAt are UTC RFC3339. PaidAt is truncated to the minute.
+// OrderNo is the normalized order or transaction number, or empty when the
+// screenshot did not show one. PaidAtDefaulted is true when PaidAt was filled
+// with the upload time because the model omitted it.
 type Bill struct {
-	ID           int64  `json:"id"`
-	AmountCents  int64  `json:"amount_cents"`
-	Amount       string `json:"amount"`
-	Currency     string `json:"currency"`
-	Merchant     string `json:"merchant"`
-	Category     string `json:"category"`
-	PaidAt       string `json:"paid_at"`
-	Note         string `json:"note"`
-	ImagePath    string `json:"image_path"`
-	ContentHash  string `json:"content_hash"`
-	DedupKey     string `json:"dedup_key"`
-	RawModelJSON string `json:"raw_model_json,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ID              int64  `json:"id"`
+	AmountCents     int64  `json:"amount_cents"`
+	Amount          string `json:"amount"`
+	Currency        string `json:"currency"`
+	Merchant        string `json:"merchant"`
+	Category        string `json:"category"`
+	PaidAt          string `json:"paid_at"`
+	PaidAtDefaulted bool   `json:"paid_at_defaulted"`
+	OrderNo         string `json:"order_no"`
+	Note            string `json:"note"`
+	ImagePath       string `json:"image_path"`
+	ContentHash     string `json:"content_hash"`
+	DedupKey        string `json:"dedup_key"`
+	RawModelJSON    string `json:"raw_model_json,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 // BillList is the list_bills / GET /api/v1/bills payload.

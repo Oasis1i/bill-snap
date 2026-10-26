@@ -10,7 +10,7 @@ This repository is the skeleton: the mock extractor works offline, and the 通�
 
 1. `POST /api/v1/upload` 接收一张 png / jpeg / webp。
 2. 抽取器判断是不是账单。不是账单就返回 JSON，**不插行、不留文件**。
-3. 是账单则按去重键写入 SQLite。同一笔支付的第二张截图返回原来的那一行。
+3. 是账单则按去重规则写入 SQLite。同一笔支付的第二张截图返回原来的那一行。
 4. `GET /api/v1/bills` 和 `GET /api/v1/summary` 按时间、分类查询。
 5. `cmd/mcp-server` 用同一份 SQLite 暴露 `list_bills` 和 `summarize_spend`，给 Nori / Coin 以后接入。
 
@@ -117,10 +117,13 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 
 ## 去重和非账单
 
-两道去重，命中任意一道都返回已有行，不更新字段，也不再存第二张图。
+命中任意一道都返回已有行，不更新字段，也不再存第二张图。按下面的顺序检查。
 
 1. **内容哈希**。`content_hash = hex(SHA-256(图片原始字节))`，唯一索引。同一张截图重复上传直接命中，哪怕以后换了模型也不会另插一行。
-2. **支付键** `dedup_key`，唯一索引。材料是 UTF-8 字符串的 SHA-256 十六进制：
+
+2. **订单号** `order_no`。提示词要求模型在看到订单号、交易单号、商户单号、订单编号、交易号或商户订单号时填写；多张单号同时出现时优先交易单号，其次订单号，再次商户单号。看不到就留空。入库前归一化：去掉空白、连字符、下划线、冒号、点号、斜杠和井号，全角数字和字母折成半角，ASCII 字母大写。`无`、`未知`、`暂无`、`none`、`null`、`n/a` 当成没有单号。归一化后非空才参与比较，列上有部分唯一索引（`NULL` 可以有多行）。单号相同就是同一笔，不再看金额、商家和时间。
+
+3. **支付键** `dedup_key`，唯一索引。材料是 UTF-8 字符串的 SHA-256 十六进制，和以前一样：
 
    ```text
    <amount_cents>|<CURRENCY>|<normalized merchant>|<paid_at>
@@ -128,9 +131,15 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 
    - 金额是分，货币大写（空则 `CNY`）
    - 商家去掉首尾空白、合并中间空白、ASCII 小写（中文不变）
-   - `paid_at` 先转到 UTC，再截断到分钟，格式 RFC3339，例如 `2026-10-26T12:00:00Z`
+   - `paid_at` 先转到 UTC，再截断到分钟，格式 RFC3339，例如 `2026-10-26T04:09:00Z`
 
-所以同一分钟里、同一商家、同一金额的两张不同截图会合成一笔。商家为空时，这个键会把「同分钟同金额」并在一起；mock 总会填商家，真实模型也应该填。
+   同一分钟里、同一商家、同一金额的两张不同截图会合成一笔。商家为空时，这个键会把「同分钟同金额」并在一起；mock 总会填商家，真实模型也应该填。没有订单号的行一直用这套材料，已经写进库里的 `dedup_key` 不用重算。
+
+   两边都有单号而且不一样时，不用这一条把它们并掉。若这个支付键已经属于另一张单，第二笔改存另一个键：在上面的材料后面再加 `|<normalized order_no>` 再做 SHA-256。
+
+4. **缺省支付时间，按本地日合并**。模型没给 `paid_at` 时，用上传时刻（再截断到分钟），`note` 里附上 `paid_at missing; defaulted to upload time`，并把 `paid_at_defaulted` 记为 1。这一张的时间是缺省的，或者库里那一行是缺省的，只要金额、货币、归一化商家相同，并且支付日落在 `APP_TZ`（默认 `Asia/Shanghai`）的同一天，就视为同一笔。两边都有真实时间时，不会因为「同一天」并在一起。两边都有单号而且不一样时，也不走这一条，避免把同日同店同金额的两笔订单并掉。同一天有多笔候选时，命中 `id` 最小的那一笔。
+
+已有数据库在启动时补两列：`order_no`（可空）、`paid_at_defaulted`（整数，默认 0）。`CREATE TABLE IF NOT EXISTS` 不会给旧表加列，所以启动时看 `PRAGMA table_info`，缺了再 `ALTER TABLE`。旧行的 `note` 里如果有那句缺省说明，会把 `paid_at_defaulted` 回填成 1。从冷备份恢复的旧库同样在下次启动时补列。
 
 不是账单：HTTP 200，`is_bill: false`，不插 `bills`，不写 `data/uploads/`。
 
@@ -144,7 +153,8 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 4. 否则是账单。字段只由图片 SHA-256 决定，同一文件永远得到同一结果：
    - 金额：`100 * (1 + hash[1] % 200)` 分，也就是 1.00 到 200.00 CNY
    - 商家 / 分类：`美团外卖/外卖`、`饿了么/外卖`、`瑞幸咖啡/餐饮`、`星巴克/餐饮`、`滴滴出行/交通`、`盒马鲜生/日用`、`淘宝/购物` 里按 `hash[2]` 取一项
-   - 支付时间：`2026-01-01 12:00 UTC` 再加 `hash[0] % 365` 天
+   - 订单号：`M` 加上 SHA-256 前 6 字节的大写十六进制。每张图不同，所以 mock 不会靠订单号把两张不同的图并成一笔
+   - 支付时间：`2026-01-01 12:00 UTC` 再加 `hash[0] % 365` 天。mock 总会给时间，所以 `paid_at_defaulted` 是 0
 
 Mock 的日期不是「今天」。查询用 2026 年，或用上传响应里的 `paid_at`。`go run scripts/genpng.go` 造的彩色图会走第 4 条，白图会走第 3 条。
 
@@ -282,7 +292,7 @@ internal/api/          路由、鉴权、上传和查询
 internal/store/        SQLite。schema 的嵌入副本
 internal/extract/      Extractor、mock、通义/豆包/智谱客户端
 internal/config/       环境变量和 .env
-internal/model/        金额、去重键、时间范围
+internal/model/        金额、去重键、订单号、时间范围
 schema.sql             与 internal/store/schema.sql 保持一致
 .env.example
 scripts/smoke.sh         curl + MCP 冒烟
