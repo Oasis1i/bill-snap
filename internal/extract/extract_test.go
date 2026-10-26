@@ -34,11 +34,14 @@ func TestMockRules(t *testing.T) {
 	if a.PaidAt.Year() != 2026 || a.PaidAt.Minute() != 0 || a.PaidAt.Location() != time.UTC {
 		t.Fatalf("paid_at %s", a.PaidAt)
 	}
+	if a.PaidAtDefaulted || len(a.OrderNo) != 13 || !strings.HasPrefix(a.OrderNo, "M") {
+		t.Fatalf("order %q defaulted %v", a.OrderNo, a.PaidAtDefaulted)
+	}
 	b, err := m.Extract(ctx, noisy, "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.AmountCents != b.AmountCents || a.Merchant != b.Merchant || !a.PaidAt.Equal(b.PaidAt) || a.Category != b.Category {
+	if a.AmountCents != b.AmountCents || a.Merchant != b.Merchant || !a.PaidAt.Equal(b.PaidAt) || a.Category != b.Category || a.OrderNo != b.OrderNo {
 		t.Fatal("mock result was not deterministic")
 	}
 
@@ -119,7 +122,10 @@ func TestOpenAICompatibleParse(t *testing.T) {
 		if !bytes.Contains(body, []byte("data:image/png;base64,")) {
 			t.Errorf("missing data url")
 		}
-		inner := `{"is_bill":true,"amount":"18.50","currency":"CNY","merchant":"美团外卖","category":"外卖","paid_at":"2026-10-26T12:34:00+08:00","confidence":0.8,"notes":"ok"}`
+		if !bytes.Contains(body, []byte("order_no")) || !bytes.Contains(body, []byte("交易单号")) {
+			t.Errorf("prompt missing order number instructions")
+		}
+		inner := `{"is_bill":true,"amount":"18.50","currency":"CNY","merchant":"美团外卖","category":"外卖","paid_at":"2026-10-26T12:34:00+08:00","order_no":" 20261026-001 ","confidence":0.8,"notes":"ok"}`
 		writeChoice(w, "```json\n"+inner+"\n```")
 	}))
 	defer srv.Close()
@@ -145,6 +151,9 @@ func TestOpenAICompatibleParse(t *testing.T) {
 	if res.PaidAt.UTC().Format(time.RFC3339) != "2026-10-26T04:34:00Z" {
 		t.Fatal(res.PaidAt)
 	}
+	if res.PaidAtDefaulted || res.OrderNo != "20261026001" {
+		t.Fatalf("order %q defaulted %v", res.OrderNo, res.PaidAtDefaulted)
+	}
 
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeChoice(w, []map[string]string{{"type": "text", "text": `{"is_bill":false,"notes":"chat screenshot"}`}})
@@ -163,6 +172,53 @@ func TestOpenAICompatibleParse(t *testing.T) {
 	})
 	if _, err := ex.Extract(context.Background(), []byte{1}, "image/png"); err == nil {
 		t.Fatal("expected upstream error")
+	}
+}
+
+func TestVisionOrderNoAliasesAndDefaultedPaidAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeChoice(w, `{"is_bill":true,"amount":"10.70","currency":"CNY","merchant":"沙县小吃","category":"餐饮","order_no":"无","交易单号":"WX-4200 123","confidence":0.4}`)
+	}))
+	defer srv.Close()
+
+	ex, err := New(Options{
+		Provider:   "glm",
+		APIKey:     "test-key",
+		BaseURL:    srv.URL,
+		Model:      "glm-test",
+		HTTPClient: srv.Client(),
+		Location:   time.FixedZone("CST", 8*3600),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ex.Extract(context.Background(), []byte{9}, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.PaidAtDefaulted || !strings.Contains(res.Notes, "paid_at missing; defaulted to upload time") {
+		t.Fatalf("%+v", res)
+	}
+	if res.OrderNo != "WX4200123" || res.AmountCents != 1070 {
+		t.Fatalf("%+v", res)
+	}
+	if delta := time.Since(res.PaidAt); delta < -time.Minute || delta > 2*time.Minute {
+		t.Fatalf("defaulted paid_at %s", res.PaidAt)
+	}
+
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeChoice(w, `{"is_bill":true,"amount":10.7,"currency":"CNY","merchant":"沙县小吃","category":"餐饮","paid_at":"2026-10-26","order_no":4200001234567890123}`)
+	})
+	res, err = ex.Extract(context.Background(), []byte{9}, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.PaidAtDefaulted || res.OrderNo != "4200001234567890123" {
+		t.Fatalf("%+v", res)
+	}
+	want := time.Date(2026, 10, 26, 12, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	if !res.PaidAt.Equal(want) {
+		t.Fatal(res.PaidAt)
 	}
 }
 

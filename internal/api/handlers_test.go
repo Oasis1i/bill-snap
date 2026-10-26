@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -201,5 +203,111 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	h.ServeHTTP(wrong, wrongReq)
 	if wrong.Code != http.StatusUnauthorized {
 		t.Fatal(wrong.Body.String())
+	}
+}
+
+type seqExtractor struct {
+	i   int
+	res []extract.Result
+}
+
+func (s *seqExtractor) Extract(context.Context, []byte, string) (extract.Result, error) {
+	if s.i >= len(s.res) {
+		return extract.Result{}, fmt.Errorf("unexpected extract call")
+	}
+	out := s.res[s.i]
+	s.i++
+	return out, nil
+}
+
+func TestUploadOrderAndDefaultedDedup(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "bills.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paid := time.Date(2026, 10, 26, 12, 9, 0, 0, loc)
+	later := time.Date(2026, 10, 26, 18, 40, 0, 0, loc)
+	fuzzy := time.Date(2026, 10, 26, 20, 5, 0, 0, loc)
+	ex := &seqExtractor{res: []extract.Result{
+		{
+			IsBill: true, AmountCents: 1070, Currency: "CNY", Merchant: "沙县小吃",
+			Category: "餐饮", PaidAt: paid, OrderNo: "WX-4200 123",
+		},
+		{
+			IsBill: true, AmountCents: 1070, Currency: "CNY", Merchant: "别的店名",
+			Category: "餐饮", PaidAt: later, OrderNo: "wx4200123",
+		},
+		{
+			IsBill: true, AmountCents: 1070, Currency: "CNY", Merchant: "沙县小吃",
+			Category: "餐饮", PaidAt: later, PaidAtDefaulted: true, OrderNo: "OTHER-99",
+		},
+		{
+			IsBill: true, AmountCents: 1070, Currency: "CNY", Merchant: " 沙县小吃 ",
+			Category: "餐饮", PaidAt: fuzzy, PaidAtDefaulted: true,
+		},
+	}}
+	upload := filepath.Join(dir, "uploads")
+	srv := New(Options{
+		Token:          "test-token",
+		UploadDir:      upload,
+		Location:       loc,
+		Store:          st,
+		Extractor:      ex,
+		MaxUploadBytes: 1 << 20,
+	})
+	h := srv.Handler()
+
+	var images [][]byte
+	for seed := 21; seed <= 24; seed++ {
+		img, err := testimg.NoisyPNG(96, 96, seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		images = append(images, img)
+	}
+	post := func(img []byte) uploadResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, uploadReq(t, "bill.png", img, "test-token", ""))
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		bodyCode := rec.Code
+		if body.Bill == nil {
+			t.Fatalf("status %d %+v", bodyCode, body)
+		}
+		return body
+	}
+
+	first := post(images[0])
+	if first.Duplicate || !first.Stored || first.Bill.OrderNo != "WX4200123" || first.Bill.PaidAtDefaulted {
+		t.Fatalf("%+v", first)
+	}
+	sameOrder := post(images[1])
+	if !sameOrder.Duplicate || sameOrder.Stored || sameOrder.Bill.ID != first.Bill.ID {
+		t.Fatalf("same order number: %+v", sameOrder)
+	}
+	otherOrder := post(images[2])
+	if otherOrder.Duplicate || !otherOrder.Stored || otherOrder.Bill.ID == first.Bill.ID || otherOrder.Bill.OrderNo != "OTHER99" {
+		t.Fatalf("distinct order: %+v", otherOrder)
+	}
+	defaulted := post(images[3])
+	if !defaulted.Duplicate || defaulted.Stored || defaulted.Bill.ID != first.Bill.ID {
+		t.Fatalf("defaulted same day: %+v", defaulted)
+	}
+
+	entries, err := os.ReadDir(upload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("upload dir has %d files, want 2 (duplicates must not keep a second image)", len(entries))
 	}
 }

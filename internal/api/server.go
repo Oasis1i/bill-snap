@@ -44,6 +44,9 @@ func New(opts Options) *Server {
 	if opts.Version == "" {
 		opts.Version = version.Version
 	}
+	if opts.Store != nil {
+		opts.Store.SetLocation(opts.Location)
+	}
 	return &Server{
 		token:     opts.Token,
 		uploadDir: opts.UploadDir,

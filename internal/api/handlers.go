@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -108,13 +107,19 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: "extractor returned a negative amount"})
 		return
 	}
-	currency := res.Currency
-	if strings.TrimSpace(currency) == "" {
-		currency = "CNY"
+	in := store.NewBill{
+		AmountCents:     res.AmountCents,
+		Currency:        res.Currency,
+		Merchant:        res.Merchant,
+		Category:        res.Category,
+		PaidAt:          res.PaidAt,
+		PaidAtDefaulted: res.PaidAtDefaulted,
+		OrderNo:         res.OrderNo,
+		Note:            res.Notes,
+		ContentHash:     hash,
+		RawModelJSON:    string(res.RawJSON),
 	}
-	dedup := model.MakeDedupKey(res.AmountCents, currency, res.Merchant, res.PaidAt)
-
-	if existing, found, err := s.lookup(r.Context(), hash, dedup); err != nil {
+	if existing, found, err := s.store.FindDuplicate(r.Context(), in); err != nil {
 		slog.Error("lookup", "err", err)
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not read bills"})
 		return
@@ -129,17 +134,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not save image"})
 		return
 	}
-	bill, dup, err := s.store.InsertBill(r.Context(), store.NewBill{
-		AmountCents:  res.AmountCents,
-		Currency:     currency,
-		Merchant:     res.Merchant,
-		Category:     res.Category,
-		PaidAt:       res.PaidAt,
-		Note:         res.Notes,
-		ImagePath:    path,
-		ContentHash:  hash,
-		RawModelJSON: string(res.RawJSON),
-	})
+	in.ImagePath = path
+	bill, dup, err := s.store.InsertBill(r.Context(), in)
 	if err != nil {
 		if _, found, ferr := s.store.FindByContentHash(r.Context(), hash); ferr == nil && !found {
 			_ = os.Remove(path)
@@ -157,13 +153,6 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("bill stored", "id", bill.ID, "category", bill.Category)
 	writeJSON(w, http.StatusCreated, uploadResponse{IsBill: true, Duplicate: false, Stored: true, Bill: &bill})
-}
-
-func (s *Server) lookup(ctx context.Context, hash, dedup string) (model.Bill, bool, error) {
-	if b, ok, err := s.store.FindByContentHash(ctx, hash); err != nil || ok {
-		return b, ok, err
-	}
-	return s.store.FindByDedupKey(ctx, dedup)
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

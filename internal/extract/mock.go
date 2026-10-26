@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/Oasis1i/bill-snap/internal/model"
@@ -44,14 +45,16 @@ var catalog = []struct {
 //  2. Width or height under 64 pixels: IsBill false.
 //  3. Sampled 8-bit luminance standard deviation under 12: IsBill false
 //     (blank or nearly solid images, including a plain white screenshot).
-//  4. Otherwise IsBill true. Amount, merchant, category, and paid_at are a
-//     pure function of SHA-256(image bytes):
+//  4. Otherwise IsBill true. Amount, merchant, category, order number, and
+//     paid_at are a pure function of SHA-256(image bytes):
 //     - amount_cents = 100 * (1 + hash[1] % 200)  → 1.00 .. 200.00 CNY
 //     - merchant/category = catalog[hash[2] % len(catalog)]
+//     - order_no = "M" + uppercase hex of hash[0:6] (unique per image)
 //     - paid_at = 2026-01-01 12:00 UTC plus (hash[0] % 365) days
 //
 // The same file therefore always yields the same bill. Mock dates are not
 // "today"; query a range that covers 2026, or use the paid_at from the upload.
+// paid_at is always set, so PaidAtDefaulted is false.
 type Mock struct{}
 
 // NewMock returns the offline extractor.
@@ -87,6 +90,7 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 
 	item := catalog[int(sum[2])%len(catalog)]
 	cents := int64(sum[1]%200+1) * 100
+	orderNo := "M" + strings.ToUpper(hex.EncodeToString(sum[:6]))
 	// 2026 is not a leap year, so day offsets 0..364 stay inside the year.
 	paid := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).AddDate(0, 0, int(sum[0])%365)
 	res := Result{
@@ -97,6 +101,7 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 		Merchant:    item.Merchant,
 		Category:    item.Category,
 		PaidAt:      paid,
+		OrderNo:     orderNo,
 		Confidence:  0.99,
 		Notes:       "mock extractor: deterministic fields from sha256",
 	}
@@ -106,7 +111,9 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 	meta["currency"] = res.Currency
 	meta["merchant"] = res.Merchant
 	meta["category"] = res.Category
+	meta["order_no"] = orderNo
 	meta["paid_at"] = paid.Format(time.RFC3339)
+	meta["paid_at_defaulted"] = false
 	meta["confidence"] = res.Confidence
 	meta["notes"] = res.Notes
 	res.RawJSON = mustJSON(meta)

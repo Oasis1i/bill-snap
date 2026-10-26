@@ -21,11 +21,12 @@ import (
 const visionPrompt = `You extract payment receipts from screenshots for a personal expense tracker.
 Reply with one JSON object and no markdown.
 Schema:
-{"is_bill":true,"amount":"12.34","currency":"CNY","merchant":"","category":"外卖","paid_at":"2026-10-26T12:30:00+08:00","confidence":0.0,"notes":""}
+{"is_bill":true,"amount":"12.34","currency":"CNY","merchant":"","category":"外卖","paid_at":"2026-10-26T12:30:00+08:00","order_no":"","confidence":0.0,"notes":""}
 Rules:
 - is_bill is false when the image is not a payment receipt (chat, landscape, home screen, blank image). Leave amount empty in that case.
 - amount is major currency units, not cents. Example: 18.5 yuan is "18.50".
-- paid_at is RFC3339 with a numeric offset when the receipt shows a time. Use YYYY-MM-DD when only a date is visible.
+- paid_at is RFC3339 with a numeric offset when the receipt shows a time. Use YYYY-MM-DD when only a date is visible. Leave paid_at empty when no date or time is visible. Do not invent a time.
+- order_no is the payment's order or transaction number when one is visible (订单号, 交易单号, 商户单号, 订单编号, 交易号, 商户订单号). If several are visible, prefer 交易单号, then 订单号, then 商户单号. Copy the number as printed. Leave order_no empty when none is visible. Do not invent one.
 - category is a short Chinese label such as 外卖, 餐饮, 交通, 日用, 购物, or 其他.
 - confidence is from 0 to 1.`
 
@@ -137,14 +138,52 @@ type chatResponse struct {
 }
 
 type visionPayload struct {
-	IsBill     bool            `json:"is_bill"`
-	Amount     json.RawMessage `json:"amount"`
-	Currency   string          `json:"currency"`
-	Merchant   string          `json:"merchant"`
-	Category   string          `json:"category"`
-	PaidAt     string          `json:"paid_at"`
-	Confidence float64         `json:"confidence"`
-	Notes      string          `json:"notes"`
+	IsBill          bool            `json:"is_bill"`
+	Amount          json.RawMessage `json:"amount"`
+	Currency        string          `json:"currency"`
+	Merchant        string          `json:"merchant"`
+	Category        string          `json:"category"`
+	PaidAt          string          `json:"paid_at"`
+	OrderNo         flexString      `json:"order_no"`
+	TransactionNo   flexString      `json:"transaction_no"`
+	TransactionID   flexString      `json:"transaction_id"`
+	MerchantOrderNo flexString      `json:"merchant_order_no"`
+	OutTradeNo      flexString      `json:"out_trade_no"`
+	OrderNumber     flexString      `json:"order_number"`
+	OrderNoCN       flexString      `json:"订单号"`
+	TxnNoCN         flexString      `json:"交易单号"`
+	MerchantNoCN    flexString      `json:"商户单号"`
+	MerchantOrderCN flexString      `json:"商户订单号"`
+	OrderCodeCN     flexString      `json:"订单编号"`
+	TradeNoCN       flexString      `json:"交易号"`
+	Confidence      float64         `json:"confidence"`
+	Notes           string          `json:"notes"`
+}
+
+// flexString accepts a JSON string or number. Receipt models sometimes emit
+// an all-digit order number without quotes.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*f = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*f = flexString(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*f = flexString(n.String())
+	return nil
 }
 
 func contentString(raw json.RawMessage) string {
@@ -215,32 +254,56 @@ func resultFromModelJSON(provider string, raw json.RawMessage, loc *time.Locatio
 	if err != nil {
 		return Result{}, fmt.Errorf("%s: %w", provider, err)
 	}
-	paid, extra, err := parseModelTime(payload.PaidAt, loc)
+	paid, defaulted, err := parseModelTime(payload.PaidAt, loc)
 	if err != nil {
 		return Result{}, fmt.Errorf("%s: %w", provider, err)
 	}
-	if extra != "" {
+	if defaulted {
 		if notes != "" {
 			notes += "; "
 		}
-		notes += extra
+		notes += model.PaidAtDefaultedNote
 	}
 	currency := strings.ToUpper(strings.TrimSpace(payload.Currency))
 	if currency == "" {
 		currency = "CNY"
 	}
 	return Result{
-		IsBill:      true,
-		Amount:      model.FormatCents(cents),
-		AmountCents: cents,
-		Currency:    currency,
-		Merchant:    strings.TrimSpace(payload.Merchant),
-		Category:    strings.TrimSpace(payload.Category),
-		PaidAt:      paid,
-		Confidence:  payload.Confidence,
-		Notes:       notes,
-		RawJSON:     raw,
+		IsBill:          true,
+		Amount:          model.FormatCents(cents),
+		AmountCents:     cents,
+		Currency:        currency,
+		Merchant:        strings.TrimSpace(payload.Merchant),
+		Category:        strings.TrimSpace(payload.Category),
+		PaidAt:          paid,
+		PaidAtDefaulted: defaulted,
+		OrderNo:         firstOrderNo(payload),
+		Confidence:      payload.Confidence,
+		Notes:           notes,
+		RawJSON:         raw,
 	}, nil
+}
+
+func firstOrderNo(p visionPayload) string {
+	for _, v := range []flexString{
+		p.OrderNo,
+		p.TransactionNo,
+		p.TransactionID,
+		p.MerchantOrderNo,
+		p.OutTradeNo,
+		p.OrderNumber,
+		p.TxnNoCN,
+		p.OrderNoCN,
+		p.MerchantNoCN,
+		p.MerchantOrderCN,
+		p.OrderCodeCN,
+		p.TradeNoCN,
+	} {
+		if n := model.NormalizeOrderNo(string(v)); n != "" {
+			return n
+		}
+	}
+	return ""
 }
 
 func rawAmount(raw json.RawMessage) (string, error) {
@@ -260,27 +323,27 @@ func rawAmount(raw json.RawMessage) (string, error) {
 	return n.String(), nil
 }
 
-func parseModelTime(s string, loc *time.Location) (time.Time, string, error) {
+func parseModelTime(s string, loc *time.Location) (time.Time, bool, error) {
 	if loc == nil {
 		loc = time.UTC
 	}
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return time.Now().UTC(), "paid_at missing; defaulted to upload time", nil
+		return time.Now().UTC(), true, nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, "", nil
+		return t, false, nil
 	}
 	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return t, "", nil
+		return t, false, nil
 	}
 	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, loc); err == nil {
-		return t, "", nil
+		return t, false, nil
 	}
 	if t, err := time.ParseInLocation("2006-01-02", s, loc); err == nil {
-		return time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc), "", nil
+		return time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc), false, nil
 	}
-	return time.Time{}, "", fmt.Errorf("unrecognized paid_at %q", s)
+	return time.Time{}, false, fmt.Errorf("unrecognized paid_at %q", s)
 }
 
 func truncate(s string, n int) string {

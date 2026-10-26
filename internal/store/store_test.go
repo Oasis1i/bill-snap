@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Oasis1i/bill-snap/internal/model"
 )
 
 func openTest(t *testing.T) *Store {
@@ -118,4 +121,331 @@ func TestInsertDedupListSummary(t *testing.T) {
 	if _, _, err := st.InsertBill(ctx, NewBill{AmountCents: 1, PaidAt: paid, ContentHash: ""}); err == nil {
 		t.Fatal("expected missing hash error")
 	}
+}
+
+func TestOpenDefaultsToShanghai(t *testing.T) {
+	st := openTest(t)
+	if st.loc == nil || st.loc.String() != "Asia/Shanghai" {
+		t.Fatalf("location %v", st.loc)
+	}
+}
+
+func TestOrderNumberDedup(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	loc := shanghai(t)
+	st.SetLocation(loc)
+
+	first, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 1070,
+		Currency:    "CNY",
+		Merchant:    "沙县小吃",
+		Category:    "餐饮",
+		PaidAt:      time.Date(2026, 10, 26, 12, 9, 0, 0, loc),
+		OrderNo:     "  WX-4200 123 ",
+		ContentHash: strings.Repeat("a", 64),
+		Note:        "first",
+	})
+	if err != nil || dup {
+		t.Fatalf("insert: dup=%v err=%v", dup, err)
+	}
+	if first.OrderNo != "WX4200123" || first.PaidAtDefaulted {
+		t.Fatalf("%+v", first)
+	}
+
+	// Same order number, different amount, merchant, and day.
+	again, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 2000,
+		Currency:    "cny",
+		Merchant:    "沙县小吃(路店)",
+		Category:    "餐饮",
+		PaidAt:      time.Date(2026, 10, 27, 8, 0, 0, 0, loc),
+		OrderNo:     "wx4200123",
+		ContentHash: strings.Repeat("b", 64),
+	})
+	if err != nil || !dup || again.ID != first.ID || again.Note != "first" {
+		t.Fatalf("order number should win: %+v dup=%v err=%v", again, dup, err)
+	}
+
+	// Same minute as the first row, but a different order number. The plain
+	// dedup_key would collide; the second order must still be stored.
+	other, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 1070,
+		Currency:    "CNY",
+		Merchant:    "沙县小吃",
+		PaidAt:      time.Date(2026, 10, 26, 12, 9, 40, 0, loc),
+		OrderNo:     "ORD-B",
+		ContentHash: strings.Repeat("c", 64),
+	})
+	if err != nil || dup || other.ID == first.ID {
+		t.Fatalf("different order numbers in the same minute: %+v dup=%v err=%v", other, dup, err)
+	}
+	wantKey := model.MakeDistinctOrderDedupKey(1070, "CNY", "沙县小吃", otherPaid(loc), "ORD-B")
+	if other.DedupKey != wantKey || other.OrderNo != "ORDB" {
+		t.Fatalf("key %s order %s", other.DedupKey, other.OrderNo)
+	}
+	if first.DedupKey != model.MakeDedupKey(1070, "CNY", "沙县小吃", time.Date(2026, 10, 26, 12, 9, 0, 0, loc)) {
+		t.Fatal("first row should keep the plain dedup key")
+	}
+}
+
+func otherPaid(loc *time.Location) time.Time {
+	return time.Date(2026, 10, 26, 12, 9, 40, 0, loc)
+}
+
+func TestDefaultedPaidAtSameLocalDay(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	loc := shanghai(t)
+	st.SetLocation(loc)
+
+	uploaded := time.Date(2026, 10, 26, 10, 15, 0, 0, loc)
+	real := time.Date(2026, 10, 26, 12, 9, 0, 0, loc)
+	first, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents:     1070,
+		Currency:        "CNY",
+		Merchant:        "沙县小吃",
+		Category:        "餐饮",
+		PaidAt:          uploaded,
+		PaidAtDefaulted: true,
+		Note:            model.PaidAtDefaultedNote,
+		ContentHash:     strings.Repeat("a", 64),
+	})
+	if err != nil || dup || !first.PaidAtDefaulted {
+		t.Fatalf("defaulted insert: %+v dup=%v err=%v", first, dup, err)
+	}
+
+	second, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 1070,
+		Currency:    "CNY",
+		Merchant:    " 沙县小吃 ",
+		Category:    "餐饮",
+		PaidAt:      real,
+		ContentHash: strings.Repeat("b", 64),
+	})
+	if err != nil || !dup || second.ID != first.ID {
+		t.Fatalf("same Shanghai day should dedup: %+v dup=%v err=%v", second, dup, err)
+	}
+
+	// Real time first, defaulted upload later, still the same local day
+	// even though the UTC dates differ (00:30 and 23:00 in Shanghai).
+	early := time.Date(2026, 10, 26, 0, 30, 0, 0, loc)
+	late := time.Date(2026, 10, 26, 23, 0, 0, 0, loc)
+	morning, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 1800,
+		Currency:    "CNY",
+		Merchant:    "瑞幸咖啡",
+		PaidAt:      early,
+		ContentHash: strings.Repeat("c", 64),
+	})
+	if err != nil || dup {
+		t.Fatalf("%+v dup=%v err=%v", morning, dup, err)
+	}
+	evening, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents:     1800,
+		Currency:        "CNY",
+		Merchant:        "瑞幸咖啡",
+		PaidAt:          late,
+		PaidAtDefaulted: true,
+		ContentHash:     strings.Repeat("d", 64),
+	})
+	if err != nil || !dup || evening.ID != morning.ID {
+		t.Fatalf("shanghai day across UTC dates: %+v dup=%v err=%v", evening, dup, err)
+	}
+
+	// 23:30 and 00:30 the next calendar day in Shanghai share a UTC date.
+	night, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 2500,
+		Currency:    "CNY",
+		Merchant:    "星巴克",
+		PaidAt:      time.Date(2026, 10, 26, 23, 30, 0, 0, loc),
+		ContentHash: strings.Repeat("e", 64),
+	})
+	if err != nil || dup {
+		t.Fatalf("%+v dup=%v err=%v", night, dup, err)
+	}
+	afterMidnight, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents:     2500,
+		Currency:        "CNY",
+		Merchant:        "星巴克",
+		PaidAt:          time.Date(2026, 10, 27, 0, 30, 0, 0, loc),
+		PaidAtDefaulted: true,
+		ContentHash:     strings.Repeat("f", 64),
+	})
+	if err != nil || dup || afterMidnight.ID == night.ID {
+		t.Fatalf("next Shanghai day must stay separate: %+v dup=%v err=%v", afterMidnight, dup, err)
+	}
+
+	// Two real timestamps on the same day are not merged just because the
+	// clock differs. dedup_key still requires the same minute.
+	lunch, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 900,
+		Currency:    "CNY",
+		Merchant:    "盒马鲜生",
+		PaidAt:      time.Date(2026, 10, 26, 12, 0, 0, 0, loc),
+		ContentHash: strings.Repeat("1", 64),
+	})
+	if err != nil || dup {
+		t.Fatalf("%+v dup=%v err=%v", lunch, dup, err)
+	}
+	later, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 900,
+		Currency:    "CNY",
+		Merchant:    "盒马鲜生",
+		PaidAt:      time.Date(2026, 10, 26, 13, 0, 0, 0, loc),
+		ContentHash: strings.Repeat("2", 64),
+	})
+	if err != nil || dup || later.ID == lunch.ID {
+		t.Fatalf("real times an hour apart: %+v dup=%v err=%v", later, dup, err)
+	}
+}
+
+func TestDistinctOrderNumbersNotMerged(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	loc := shanghai(t)
+	st.SetLocation(loc)
+
+	paid := time.Date(2026, 10, 26, 12, 9, 0, 0, loc)
+	first, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 1070,
+		Currency:    "CNY",
+		Merchant:    "沙县小吃",
+		Category:    "餐饮",
+		PaidAt:      paid,
+		OrderNo:     "ORDER-A",
+		ContentHash: strings.Repeat("a", 64),
+	})
+	if err != nil || dup {
+		t.Fatalf("%+v dup=%v err=%v", first, dup, err)
+	}
+
+	// Same amount, merchant, and local day, and this paid_at was defaulted,
+	// so the day rule would merge them if order numbers were ignored.
+	second, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents:     1070,
+		Currency:        "CNY",
+		Merchant:        "沙县小吃",
+		Category:        "餐饮",
+		PaidAt:          time.Date(2026, 10, 26, 18, 40, 0, 0, loc),
+		PaidAtDefaulted: true,
+		OrderNo:         "ORDER-B",
+		ContentHash:     strings.Repeat("b", 64),
+	})
+	if err != nil || dup || second.ID == first.ID {
+		t.Fatalf("distinct orders must not merge: %+v dup=%v err=%v", second, dup, err)
+	}
+	if second.OrderNo != "ORDERB" || !second.PaidAtDefaulted {
+		t.Fatalf("%+v", second)
+	}
+}
+
+func TestMigrateLegacyDefaultedPaidAt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := `
+CREATE TABLE bills (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    amount_cents    INTEGER NOT NULL,
+    currency        TEXT    NOT NULL,
+    merchant        TEXT    NOT NULL DEFAULT '',
+    category        TEXT    NOT NULL DEFAULT '',
+    paid_at         TEXT    NOT NULL,
+    note            TEXT    NOT NULL DEFAULT '',
+    image_path      TEXT    NOT NULL DEFAULT '',
+    content_hash    TEXT    NOT NULL,
+    dedup_key       TEXT    NOT NULL,
+    raw_model_json  TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX idx_bills_dedup_key ON bills(dedup_key);
+CREATE UNIQUE INDEX idx_bills_content_hash ON bills(content_hash);
+`
+	if _, err := db.Exec(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO bills (
+		amount_cents, currency, merchant, category, paid_at, note, image_path,
+		content_hash, dedup_key, raw_model_json, created_at, updated_at
+	) VALUES (1070, 'CNY', '沙县小吃', '餐饮', '2026-10-26T02:15:00Z', ?, '', ?, ?, '', '2026-10-26T02:16:00Z', '2026-10-26T02:16:00Z')`,
+		model.PaidAtDefaultedNote, strings.Repeat("a", 64), strings.Repeat("d", 64),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO bills (
+		amount_cents, currency, merchant, category, paid_at, note, image_path,
+		content_hash, dedup_key, raw_model_json, created_at, updated_at
+	) VALUES (1500, 'CNY', '瑞幸咖啡', '餐饮', '2026-10-26T01:00:00Z', 'ok', '', ?, ?, '', '2026-10-26T01:01:00Z', '2026-10-26T01:01:00Z')`,
+		strings.Repeat("b", 64), strings.Repeat("e", 64),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if st != nil {
+			_ = st.Close()
+		}
+	})
+
+	var indexName string
+	if err := st.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_bills_order_no'`).Scan(&indexName); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	shaxian, ok, err := st.FindByContentHash(ctx, strings.Repeat("a", 64))
+	if err != nil || !ok {
+		t.Fatalf("legacy row: ok=%v err=%v", ok, err)
+	}
+	if !shaxian.PaidAtDefaulted || shaxian.OrderNo != "" || shaxian.AmountCents != 1070 {
+		t.Fatalf("backfill: %+v", shaxian)
+	}
+	luckin, ok, err := st.FindByContentHash(ctx, strings.Repeat("b", 64))
+	if err != nil || !ok || luckin.PaidAtDefaulted {
+		t.Fatalf("note without the defaulted sentence: %+v ok=%v err=%v", luckin, ok, err)
+	}
+
+	// 12:09 +08 is 04:09Z, same Shanghai day as the legacy 10:15 upload.
+	again, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 1070,
+		Currency:    "CNY",
+		Merchant:    "沙县小吃",
+		PaidAt:      time.Date(2026, 10, 26, 12, 9, 0, 0, shanghai(t)),
+		ContentHash: strings.Repeat("c", 64),
+	})
+	if err != nil || !dup || again.ID != shaxian.ID {
+		t.Fatalf("migrated row should match the real paid_at: %+v dup=%v err=%v", again, dup, err)
+	}
+
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, ok, err := st.FindByContentHash(ctx, strings.Repeat("a", 64))
+	if err != nil || !ok || !reopened.PaidAtDefaulted {
+		t.Fatalf("reopen: %+v ok=%v err=%v", reopened, ok, err)
+	}
+}
+
+func shanghai(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loc
 }

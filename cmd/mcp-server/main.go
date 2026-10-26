@@ -28,6 +28,7 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	st.SetLocation(cfg.Location)
 	slog.Info("bill-snap mcp", "db", cfg.DBPath, "tz", cfg.Timezone)
 	return mcp.Serve(os.Stdin, os.Stdout, st, cfg.Location)
 }
