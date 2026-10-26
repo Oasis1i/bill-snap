@@ -1,1 +1,230 @@
 # bill-snap
+
+个人截图记账的 MVP。付完款后把收据截图上传，服务端用多模态模型抽出金额、商家、分类和时间，写入 SQLite，再用 HTTP 和 MCP 回答「这周外卖花了多少」。
+
+Personal screenshot expense tracker. Upload a receipt image, extract bill fields, store them in SQLite, and query the result over HTTP or a small MCP server.
+
+This repository is the skeleton: the mock extractor works offline, and the 通义 VL / 豆包 / 智谱 GLM-4V clients are thin OpenAI-compatible HTTP stubs. They are not chatbot subscriptions.
+
+## 它做什么
+
+1. `POST /api/v1/upload` 接收一张 png / jpeg / webp。
+2. 抽取器判断是不是账单。不是账单就返回 JSON，**不插行、不留文件**。
+3. 是账单则按去重键写入 SQLite。同一笔支付的第二张截图返回原来的那一行。
+4. `GET /api/v1/bills` 和 `GET /api/v1/summary` 按时间、分类查询。
+5. `cmd/mcp-server` 用同一份 SQLite 暴露 `list_bills` 和 `summarize_spend`，给 Nori / Coin 以后接入。
+
+所有会碰到账单数据的 HTTP 接口都要 token。`/healthz` 不需要。
+
+## 本地运行
+
+需要 Go 1.22 或更新。SQLite 用纯 Go 驱动 `modernc.org/sqlite`，不用 CGO，也不用 Docker。
+
+```bash
+cp .env.example .env
+# 把 UPLOAD_TOKEN 改成一长串随机字符串
+
+go run ./cmd/server
+# 或
+make run
+```
+
+进程会读取工作目录下的 `.env`，但**不会覆盖**已经存在的环境变量。`.env` 不要提交。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `HTTP_ADDR` | `127.0.0.1:8080` | 只监听本机。手机走局域网时改成 `:8080` |
+| `PORT` | 空 | 没设 `HTTP_ADDR` 时，听 `:$PORT` |
+| `UPLOAD_TOKEN` | 空 | HTTP 必填。`Authorization: Bearer <token>` 或 `X-API-Token` |
+| `DB_PATH` | `data/bills.db` | SQLite 文件，启动时创建 |
+| `UPLOAD_DIR` | `data/uploads` | 账单截图目录。非账单不会写到这里 |
+| `APP_TZ` | `Asia/Shanghai` | `YYYY-MM-DD` 查询按这个时区解释 |
+| `MAX_UPLOAD_BYTES` | `8388608` | 单张上限，8 MiB |
+| `VISION_PROVIDER` | `mock` | `mock`、`qwen`、`doubao`、`glm` |
+| `VISION_API_KEY` | 空 | 真实供应商才需要 |
+| `VISION_BASE_URL` | 按供应商 | 留空用下面的默认地址 |
+| `VISION_MODEL` | 按供应商 | 豆包必须填 endpoint id |
+
+默认地址（可用 `VISION_BASE_URL` / `VISION_MODEL` 覆盖，上线前请按控制台核对）：
+
+- 通义 VL：`https://dashscope.aliyuncs.com/compatible-mode/v1`，模型 `qwen-vl-plus`
+- 智谱 GLM-4V：`https://open.bigmodel.cn/api/paas/v4`，模型 `glm-4v-plus`
+- 豆包 / 火山方舟：`https://ark.cn-beijing.volces.com/api/v3`，`VISION_MODEL` 填 `ep-...`，没有默认模型
+
+`make build` 会生成 `bin/bill-snap` 和 `bin/bill-snap-mcp`。
+
+### 用 curl 打一遍
+
+另开一个终端。先造一张「像账单」的图和一张空白图（mock 规则见下文）：
+
+```bash
+go run scripts/genpng.go /tmp/bill.png /tmp/blank.png
+
+curl -sS -X POST "http://127.0.0.1:8080/api/v1/upload" \
+  -H "Authorization: Bearer $UPLOAD_TOKEN" \
+  -F "image=@/tmp/bill.png;type=image/png"
+
+curl -sS "http://127.0.0.1:8080/api/v1/bills?from=2026-01-01&to=2026-12-31" \
+  -H "Authorization: Bearer $UPLOAD_TOKEN"
+
+curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&category=外卖" \
+  -H "X-API-Token: $UPLOAD_TOKEN"
+```
+
+也可以 `make test` 和 `make smoke`。smoke 会起一个临时服务，用 curl 上传、查汇总，再跑一遍 MCP。
+
+### 查询参数
+
+- `from`、`to`：`YYYY-MM-DD`（按 `APP_TZ` 的整天，含首尾）或 RFC3339 时刻（`from` 含，`to` 含该秒）。
+- `category`：精确匹配，例如 `外卖`。
+- `limit`：只对列表有效，1 到 500，默认 100。
+- 不带参数表示全部时间。
+
+金额以「分」存在 `amount_cents`，同时给十进制字符串 `amount`（`18.50`）。时间以 UTC RFC3339 存储，精度到分钟。
+
+### HTTP 状态
+
+| 状态 | 含义 |
+| --- | --- |
+| 201 | 新账单已写入。`stored: true` |
+| 200 | 重复账单（`duplicate: true`）或不是账单（`is_bill: false`，`stored: false`） |
+| 401 | 没有 token，或 token 不对 |
+| 400 | 缺 `image` 字段，或不是 png/jpeg/webp |
+| 413 | 超过大小限制 |
+| 502 | 抽取器失败（例如真实供应商的 key / 模型还没填好） |
+
+不是账单时的响应类似：
+
+```json
+{"is_bill":false,"duplicate":false,"stored":false,"reason":"image is nearly a solid color, so it was not treated as a receipt"}
+```
+
+快捷指令应把所有 2xx 当「请求被理解」，再看 `is_bill`，不要把「不是账单」当成网络错误。
+
+## iPhone 快捷指令
+
+还没有 `.shortcut` 文件。Back Tap → 截图 → POST 可以以后再串。上传约定：
+
+- URL：`https://<你的域名>/api/v1/upload`
+- 方法：`POST`
+- Header：`Authorization: Bearer <UPLOAD_TOKEN>`（或 `X-API-Token: <UPLOAD_TOKEN>`）
+- Body：表单（Form），文件字段名必须是 `image`
+- 类型：png、jpeg 或 webp
+
+快捷指令里用「获取 URL 内容」：方法 POST，请求体选「表单」，字段 `image` 选刚才的截图。成功后读 JSON 里的 `bill.merchant`、`bill.amount`，或者非账单的 `reason`。
+
+同一张图传两次是安全的，第二次会带回已有记录。
+
+## 去重和非账单
+
+两道去重，命中任意一道都返回已有行，不更新字段，也不再存第二张图。
+
+1. **内容哈希**。`content_hash = hex(SHA-256(图片原始字节))`，唯一索引。同一张截图重复上传直接命中，哪怕以后换了模型也不会另插一行。
+2. **支付键** `dedup_key`，唯一索引。材料是 UTF-8 字符串的 SHA-256 十六进制：
+
+   ```text
+   <amount_cents>|<CURRENCY>|<normalized merchant>|<paid_at>
+   ```
+
+   - 金额是分，货币大写（空则 `CNY`）
+   - 商家去掉首尾空白、合并中间空白、ASCII 小写（中文不变）
+   - `paid_at` 先转到 UTC，再截断到分钟，格式 RFC3339，例如 `2026-10-26T12:00:00Z`
+
+所以同一分钟里、同一商家、同一金额的两张不同截图会合成一笔。商家为空时，这个键会把「同分钟同金额」并在一起；mock 总会填商家，真实模型也应该填。
+
+不是账单：HTTP 200，`is_bill: false`，不插 `bills`，不写 `data/uploads/`。
+
+## Mock 怎么判断
+
+`VISION_PROVIDER=mock`（默认）不联网。规则按顺序：
+
+1. 空文件，或无法解码的 png/jpeg/webp → 不是账单。
+2. 宽或高小于 64 像素 → 不是账单。
+3. 采样后的 8-bit 亮度标准差 `< 12` → 不是账单（纯色、近纯色、白屏）。
+4. 否则是账单。字段只由图片 SHA-256 决定，同一文件永远得到同一结果：
+   - 金额：`100 * (1 + hash[1] % 200)` 分，也就是 1.00 到 200.00 CNY
+   - 商家 / 分类：`美团外卖/外卖`、`饿了么/外卖`、`瑞幸咖啡/餐饮`、`星巴克/餐饮`、`滴滴出行/交通`、`盒马鲜生/日用`、`淘宝/购物` 里按 `hash[2]` 取一项
+   - 支付时间：`2026-01-01 12:00 UTC` 再加 `hash[0] % 365` 天
+
+Mock 的日期不是「今天」。查询用 2026 年，或用上传响应里的 `paid_at`。`go run scripts/genpng.go` 造的彩色图会走第 4 条，白图会走第 3 条。
+
+## 真实视觉接口
+
+`qwen`、`doubao`、`glm`（以及 `tongyi`、`ark`、`zhipu` 这些别名）走同一个 `Extractor` 接口：`POST {VISION_BASE_URL}/chat/completions`，OpenAI 风格的 text + `image_url` data URL，Bearer key。提示词要求模型只回一个 JSON 对象。
+
+这是可编译的薄客户端，**还没对着真实账号调通**。缺 key 时进程拒绝启动，避免静默落到一个坏配置。豆包还要自己的 endpoint id。供应商如果包一层 markdown，解析器会剥一层；若字段名不同，改 `internal/extract/openai.go` 里的 prompt 和 `visionPayload`。
+
+## MCP
+
+和 HTTP 服务读同一个 SQLite 文件，stdio，一行一条 JSON-RPC（MCP `2024-11-05`，也认 `2025-03-26` 和 `2025-06-18`）。日志在 stderr。MCP **不校验** `UPLOAD_TOKEN`：能启动这个进程的人已经能读数据库文件。
+
+```bash
+export DB_PATH=data/bills.db
+export APP_TZ=Asia/Shanghai
+go run ./cmd/mcp-server
+# 或
+make mcp
+```
+
+工具：
+
+- `list_bills`：`from`、`to`、`category`、`limit`
+- `summarize_spend`：`from`、`to`、`category` → `count`、`totals`、`by_category`
+
+Nori / Coin 以后只要支持自定义 MCP stdio，配成类似这样即可（路径改成你机器上的绝对路径）。本仓库没有这两款助手的专用插件。
+
+```json
+{
+  "mcpServers": {
+    "bill-snap": {
+      "command": "/absolute/path/to/bin/bill-snap-mcp",
+      "env": {
+        "DB_PATH": "/absolute/path/to/data/bills.db",
+        "APP_TZ": "Asia/Shanghai"
+      }
+    }
+  }
+}
+```
+
+助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，`category` 填 `外卖`。
+
+## 部署（只是轮廓）
+
+不要把带默认 token 的进程直接暴露到公网。
+
+一台便宜 VPS：把 `bin/bill-snap` 放上去，用 systemd 的 `EnvironmentFile=` 注入 token 和路径，前面再加 Caddy 或 nginx 做 HTTPS。数据目录单独放，并限制文件权限。
+
+家里的机器不想开端口：用 Cloudflare Tunnel 把本机 `127.0.0.1:8080` 转到一个 HTTPS 主机名，快捷指令访问那个名字。Token 仍然放在 Header 里，不要写进 URL。
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8080
+```
+
+这只是以后的步骤，这个 MVP 没有替你部署。
+
+## 安全
+
+- 每个会读或写账单的 HTTP 接口都要 token。错 token 或缺失都是 401。
+- 截图是私人付款记录。没有不带鉴权的图片下载路由；文件只在服务器磁盘上。
+- 默认只听 `127.0.0.1`。改成 `:8080` 之前先换掉 `change-me`。
+- 不要把 `.env`、`data/` 或 API key 提交进 git。
+- MCP 是本机 stdio。不要把它无鉴权地转到网络上。
+
+## 目录
+
+```text
+cmd/server/            HTTP API
+cmd/mcp-server/        MCP stdio
+internal/api/          路由、鉴权、上传和查询
+internal/store/        SQLite。schema 的嵌入副本
+internal/extract/      Extractor、mock、通义/豆包/智谱客户端
+internal/config/       环境变量和 .env
+internal/model/        金额、去重键、时间范围
+schema.sql             与 internal/store/schema.sql 保持一致
+.env.example
+scripts/smoke.sh       curl + MCP 冒烟
+Makefile
+```
+
+`go build ./...` 应能通过。`make test` 覆盖去重、非账单丢弃、鉴权和 MCP。`make smoke` 对一个临时 SQLite 文件做真实 curl。
