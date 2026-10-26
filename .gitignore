@@ -1,0 +1,12 @@
+# Local secrets and runtime data. .env.example is the committed template.
+.env
+data/
+
+# Binaries
+bin/
+
+# SQLite files created outside data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
