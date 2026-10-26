@@ -1,4 +1,4 @@
-.PHONY: run mcp build test smoke tidy
+.PHONY: run mcp build test smoke tidy backup-drive restore-drive
 
 # .env in the working directory is loaded by the process when present.
 
@@ -21,3 +21,10 @@ smoke:
 
 tidy:
 	go mod tidy
+
+# rclone cold backup. Reads DB_PATH and the DRIVE_* variables from .env.
+backup-drive:
+	bash scripts/backup-drive.sh
+
+restore-drive:
+	bash scripts/restore-drive.sh

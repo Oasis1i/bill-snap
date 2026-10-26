@@ -203,12 +203,74 @@ cloudflared tunnel --url http://127.0.0.1:8080
 
 这只是以后的步骤，这个 MVP 没有替你部署。
 
+## Google Drive 冷备份
+
+本地 SQLite（`DB_PATH`）是事实来源。Google Drive 只做单向冷备份：上传一份一致的数据库快照，并在本机库缺失或没有账单时拉回来。
+
+备份由这台机器上的 cron 执行 `scripts/backup-drive.sh`。这套 cron 替换任何 Grok Bot 定时任务；不需要外部 bot 常驻。
+
+脚本只把 SQLite 快照交给 rclone。不会上传 `.env`、`UPLOAD_TOKEN` 或 `VISION_API_KEY`。rclone 的 Google 凭证留在 rclone 自己的配置文件里，不要写进仓库。
+
+### 一次性配置 rclone
+
+安装 [rclone](https://rclone.org/)，然后：
+
+```bash
+rclone config
+```
+
+新建一个 Google Drive remote，名字与 `RCLONE_REMOTE` 相同（默认 `gdrive`）。Storage 选 `drive`。登录已经拥有 `bill-snap/latest/` 和 `bill-snap/backups/` 的那个 Google 账号。Scope 选完整 Drive 访问（`drive`），rclone 才能看到以前由别的客户端建好的目录。`drive.file` 只能看见这个 rclone 自己创建的文件。
+
+目录不存在时，脚本会创建 `DRIVE_BACKUP_ROOT/latest` 和 `DRIVE_BACKUP_ROOT/backups`（默认根目录 `bill-snap`）。
+
+### 备份
+
+`scripts/backup-drive.sh`（或 `make backup-drive`）：
+
+1. 定位仓库根目录，读取 `.env` 里尚未在环境中设置的 `DB_PATH`、`RCLONE_REMOTE`、`DRIVE_BACKUP_ROOT`、`APP_TZ`、`DRIVE_BACKUP_KEEP`。
+2. 要求本机有 `sqlite3` 和 `rclone`。
+3. 对正在使用的库做 WAL checkpoint，再用 `sqlite3 .backup` 写到临时文件。上传的是这份快照。
+4. 覆盖写到 `<RCLONE_REMOTE>:<DRIVE_BACKUP_ROOT>/latest/bills.db`。
+5. 再写一份 `backups/bills-YYYYMMDD-HHMM.db`。时间用 `APP_TZ`（默认 `Asia/Shanghai`），精确到分钟。同一分钟内再次运行会覆盖这一份。
+6. 默认只保留最新 14 份符合 `bills-YYYYMMDD-HHMM.db` 的对象，按文件名排序删除更老的。`DRIVE_BACKUP_KEEP=0` 表示不删除。Google Drive 上 rclone 默认把删除放进回收站（`drive-use-trash`）。其他文件名不会被删。
+
+成功时打印一行，里面有账单条数和两个远程路径。任一步失败都以非零状态退出。
+
+### 恢复
+
+换机器、重装、或本地 `data/bills.db` 丢了之后，确认这台机器的 rclone 用的是同一个 Google 账号，然后：
+
+```bash
+scripts/restore-drive.sh
+# 或
+make restore-drive
+```
+
+本地文件不存在、是空文件、或 `bills` 表里没有行时，从 `latest/bills.db` 下载到 `DB_PATH`。已经有账单时脚本直接退出，避免盖掉数据。确定要覆盖时：
+
+```bash
+scripts/restore-drive.sh --force
+```
+
+`--force` 会先把当前非空文件复制为 `DB_PATH.before-restore`（下次恢复会覆盖这份副本）。如果 `bill-snap` 或 MCP 进程还开着这个库，脚本会警告并拒绝写入。本机没有 `lsof` 或 `fuser` 时做不了这个检查，脚本会提示先停掉进程。先停掉这两个进程再恢复。
+
+### crontab
+
+每天 08:00、14:00、20:00（Asia/Shanghai）跑一次。`CRON_TZ` 决定触发时刻；快照文件名仍由 `APP_TZ` 决定。把路径换成这台机器上的绝对路径。`data/` 需要已存在（服务启动时会创建，也可以自己 `mkdir -p`）：
+
+```cron
+CRON_TZ=Asia/Shanghai
+0 8,14,20 * * * /absolute/path/to/bill-snap/scripts/backup-drive.sh >> /absolute/path/to/bill-snap/data/backup-drive.log 2>&1
+```
+
+脚本根据自己的路径找仓库根目录并读取那里的 `.env`，不依赖 cron 的当前目录。日志放在 `data/` 下，这个目录已被 git 忽略。主机时区已经是 Asia/Shanghai 时，可以不写 `CRON_TZ`。`CRON_TZ` 适用于 cronie / Vixie cron。
+
 ## 安全
 
 - 每个会读或写账单的 HTTP 接口都要 token。错 token 或缺失都是 401。
 - 截图是私人付款记录。没有不带鉴权的图片下载路由；文件只在服务器磁盘上。
 - 默认只听 `127.0.0.1`。改成 `:8080` 之前先换掉 `change-me`。
-- 不要把 `.env`、`data/` 或 API key 提交进 git。
+- 不要把 `.env`、`data/` 或 API key 提交进 git。冷备份只上传 SQLite 快照。
 - MCP 是本机 stdio。不要把它无鉴权地转到网络上。
 
 ## 目录
@@ -223,7 +285,10 @@ internal/config/       环境变量和 .env
 internal/model/        金额、去重键、时间范围
 schema.sql             与 internal/store/schema.sql 保持一致
 .env.example
-scripts/smoke.sh       curl + MCP 冒烟
+scripts/smoke.sh         curl + MCP 冒烟
+scripts/backup-drive.sh  SQLite 快照冷备份到 Google Drive（rclone）
+scripts/restore-drive.sh 本地库缺失或为空时从 Drive 拉回
+scripts/drive-env.sh     上面两个脚本共用的环境变量
 Makefile
 ```
 
