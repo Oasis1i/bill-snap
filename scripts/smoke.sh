@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Curl the local server with the mock extractor, then ask the MCP process
-# to summarize the same SQLite file.
+# Curl the local server with the mock extractor, exercise POST /mcp,
+# then ask the stdio MCP process to summarize the same SQLite file.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,6 +25,7 @@ trap cleanup EXIT
 ADDR="127.0.0.1:18765"
 export HTTP_ADDR="$ADDR"
 export UPLOAD_TOKEN="smoke-token"
+export MCP_TOKEN="smoke-mcp-token"
 export DB_PATH="$TMP/bills.db"
 export UPLOAD_DIR="$TMP/uploads"
 export VISION_PROVIDER="mock"
@@ -121,6 +122,24 @@ print("summary", json.dumps(summary, ensure_ascii=False))
 
 code, body = curl(["-H", "Authorization: Bearer nope", f"{base}/api/v1/summary"])
 assert code == 401, (code, body)
+
+mcp = "smoke-mcp-token"
+init = json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}})
+code, body = curl(["-H", "Content-Type: application/json", "-H", "Accept: application/json, text/event-stream", "-d", init, f"{base}/mcp"])
+assert code == 401, (code, body)
+code, body = curl(["-H", f"Authorization: Bearer {token}", "-H", "Content-Type: application/json", "-H", "Accept: application/json, text/event-stream", "-d", init, f"{base}/mcp"])
+assert code == 401, (code, body)
+code, body = curl(["-H", f"Authorization: Bearer {mcp}", "-H", "Content-Type: application/json", "-H", "Accept: application/json, text/event-stream", "-d", init, f"{base}/mcp"])
+assert code == 200, (code, body)
+assert json.loads(body)["result"]["protocolVersion"] == "2025-06-18"
+call = json.dumps({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"summarize_spend","arguments":{"from":"2026-01-01","to":"2026-12-31"}}})
+code, body = curl(["-H", f"Authorization: Bearer {mcp}", "-H", "Content-Type: application/json", "-H", "Accept: application/json, text/event-stream", "-d", call, f"{base}/mcp"])
+assert code == 200, (code, body)
+assert "image_path" not in body and "raw_model_json" not in body
+summary = json.loads(json.loads(body)["result"]["content"][0]["text"])
+assert summary["count"] == 1 and summary["amount"] == bill["amount"], summary
+code, body = curl(["-H", f"Authorization: Bearer {mcp}", f"{base}/mcp"])
+assert code == 405, (code, body)
 print("http ok")
 PY
 
@@ -156,12 +175,13 @@ lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
 msgs = [json.loads(ln) for ln in lines]
 by_id = {m["id"]: m for m in msgs if "id" in m}
 names = {t["name"] for t in by_id[2]["result"]["tools"]}
-assert names == {"list_bills", "summarize_spend"}, names
+assert names == {"list_bills", "summarize_spend", "list_categories"}, names
 summary = json.loads(by_id[3]["result"]["content"][0]["text"])
-assert summary["count"] == 1, summary
+assert summary["count"] == 1 and summary["amount"], summary
 listed = json.loads(by_id[4]["result"]["content"][0]["text"])
 assert listed["count"] == 1, listed
-print("mcp ok", summary["totals"])
+assert "image_path" not in by_id[4]["result"]["content"][0]["text"]
+print("mcp ok", summary["amount"])
 PY
 
 echo "smoke ok"

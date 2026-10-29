@@ -46,11 +46,14 @@ type NewBill struct {
 // From is inclusive. To is exclusive. Both are compared to paid_at stored as
 // UTC RFC3339. Category is an exact match when non-empty. It is not rewritten
 // onto the fixed enum, so an unknown filter matches nothing.
+// ExcludeCategory drops one exact category when non-empty. The HTTP API leaves
+// it empty. summarize_spend sets it to 工资 unless the caller includes income.
 type ListFilter struct {
-	From     *time.Time
-	To       *time.Time
-	Category string
-	Limit    int
+	From            *time.Time
+	To              *time.Time
+	Category        string
+	ExcludeCategory string
+	Limit           int
 }
 
 // Store is a SQLite bill database. One connection keeps locking simple for a
@@ -596,6 +599,34 @@ func (s *Store) Summarize(ctx context.Context, f ListFilter) (model.Summary, err
 	return out, nil
 }
 
+// SpendLine is one bill reduced to the fields a read-only summary needs.
+// Screenshot paths and model payloads are not selected.
+// Limit on the filter is ignored so a summary can see every matching row.
+type SpendLine struct {
+	PaidAt      string
+	AmountCents int64
+	Category    string
+}
+
+// SpendLines returns matching bills oldest payment first.
+func (s *Store) SpendLines(ctx context.Context, f ListFilter) ([]SpendLine, error) {
+	where, args := f.where()
+	rows, err := s.db.QueryContext(ctx, `SELECT paid_at, amount_cents, category FROM bills WHERE `+where+` ORDER BY paid_at ASC, id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SpendLine{}
+	for rows.Next() {
+		var line SpendLine
+		if err := rows.Scan(&line.PaidAt, &line.AmountCents, &line.Category); err != nil {
+			return nil, err
+		}
+		out = append(out, line)
+	}
+	return out, rows.Err()
+}
+
 func (f ListFilter) where() (string, []any) {
 	parts := []string{"1=1"}
 	var args []any
@@ -609,6 +640,10 @@ func (f ListFilter) where() (string, []any) {
 	}
 	if cat := strings.TrimSpace(f.Category); cat != "" {
 		parts = append(parts, "category = ?")
+		args = append(args, cat)
+	}
+	if cat := strings.TrimSpace(f.ExcludeCategory); cat != "" {
+		parts = append(parts, "category != ?")
 		args = append(args, cat)
 	}
 	return strings.Join(parts, " AND "), args
