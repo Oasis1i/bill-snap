@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Oasis1i/bill-snap/internal/model"
 )
 
 func TestLoadEnvFileDoesNotOverride(t *testing.T) {
@@ -42,6 +45,53 @@ func TestLoadRequiresNothingForMCP(t *testing.T) {
 	if err := cfg.ValidateForServer(); err == nil {
 		t.Fatal("empty token should fail server validation")
 	}
+}
+
+func TestLoadCategories(t *testing.T) {
+	t.Setenv("APP_TZ", "UTC")
+	t.Setenv("CATEGORIES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Categories, model.DefaultCategories()) {
+		t.Fatalf("defaults %v", cfg.Categories)
+	}
+
+	t.Setenv("CATEGORIES", "+宠物,-工资")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(cfg.Categories, "宠物") || containsString(cfg.Categories, "工资") || !containsString(cfg.Categories, "其他") {
+		t.Fatalf("custom %v", cfg.Categories)
+	}
+	if model.NormalizeCategory("宠物") == "宠物" {
+		t.Fatal("Load installed the category list; startup does that")
+	}
+
+	t.Setenv("CATEGORIES", "宠物")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Categories, []string{"宠物", "其他"}) {
+		t.Fatalf("override %v", cfg.Categories)
+	}
+
+	t.Setenv("CATEGORIES", "-其他")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "cannot be removed") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func containsString(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLoadRejectsBadLimit(t *testing.T) {

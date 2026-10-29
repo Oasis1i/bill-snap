@@ -3,9 +3,11 @@ package main
 import (
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/Oasis1i/bill-snap/internal/config"
 	"github.com/Oasis1i/bill-snap/internal/mcp"
+	"github.com/Oasis1i/bill-snap/internal/model"
 	"github.com/Oasis1i/bill-snap/internal/store"
 )
 
@@ -29,6 +31,7 @@ func run() error {
 	}
 	defer st.Close()
 	st.SetLocation(cfg.Location)
-	slog.Info("bill-snap mcp", "db", cfg.DBPath, "tz", cfg.Timezone)
+	model.UseCategories(cfg.Categories)
+	slog.Info("bill-snap mcp", "db", cfg.DBPath, "tz", cfg.Timezone, "categories", strings.Join(cfg.Categories, ","))
 	return mcp.Serve(os.Stdin, os.Stdout, st, cfg.Location)
 }

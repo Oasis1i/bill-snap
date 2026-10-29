@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 	_ "time/tzdata"
+
+	"github.com/Oasis1i/bill-snap/internal/model"
 )
 
 // Config is process configuration. The HTTP server requires UploadToken.
-// The MCP process only needs the database path and time zone.
+// The MCP process needs the database path, time zone, and category list.
 type Config struct {
 	HTTPAddr       string
 	UploadToken    string
@@ -24,6 +26,10 @@ type Config struct {
 	VisionBaseURL  string
 	VisionModel    string
 	MaxUploadBytes int64
+	// Categories is the effective label list. Empty CATEGORIES means the
+	// built-in defaults. The process applies this with model.UseCategories
+	// at startup so extraction and MCP see the same list.
+	Categories []string
 }
 
 // Load reads an optional .env file in the working directory, then the
@@ -45,6 +51,10 @@ func Load() (Config, error) {
 		}
 		maxBytes = n
 	}
+	categories, err := model.ResolveCategories(os.Getenv("CATEGORIES"))
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddr:       httpAddr(),
 		UploadToken:    strings.TrimSpace(os.Getenv("UPLOAD_TOKEN")),
@@ -57,6 +67,7 @@ func Load() (Config, error) {
 		VisionBaseURL:  strings.TrimSpace(os.Getenv("VISION_BASE_URL")),
 		VisionModel:    strings.TrimSpace(os.Getenv("VISION_MODEL")),
 		MaxUploadBytes: maxBytes,
+		Categories:     categories,
 	}, nil
 }
 

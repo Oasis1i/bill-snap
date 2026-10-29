@@ -126,7 +126,7 @@ func TestOpenAICompatibleParse(t *testing.T) {
 		if !bytes.Contains(body, []byte("order_no")) || !bytes.Contains(body, []byte("交易单号")) {
 			t.Errorf("prompt missing order number instructions")
 		}
-		for _, cat := range model.Categories {
+		for _, cat := range model.Categories() {
 			if !bytes.Contains(body, []byte(cat)) {
 				t.Errorf("prompt missing category %s", cat)
 			}
@@ -234,7 +234,7 @@ func TestVisionOrderNoAliasesAndDefaultedPaidAt(t *testing.T) {
 
 func TestMockCategoriesStayInEnum(t *testing.T) {
 	allowed := map[string]bool{}
-	for _, c := range model.Categories {
+	for _, c := range model.Categories() {
 		allowed[c] = true
 	}
 	if len(catalog) == 0 {
@@ -277,10 +277,10 @@ func TestVisionPromptCategoryEnum(t *testing.T) {
 	if err := json.Unmarshal([]byte(rest[:end+1]), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != len(model.Categories) {
+	if len(got) != len(model.Categories()) {
 		t.Fatalf("prompt enum %v", got)
 	}
-	for i, c := range model.Categories {
+	for i, c := range model.Categories() {
 		if got[i] != c {
 			t.Fatalf("prompt enum[%d]=%q want %q", i, got[i], c)
 		}
@@ -290,6 +290,32 @@ func TestVisionPromptCategoryEnum(t *testing.T) {
 	}
 	if strings.Contains(p, "such as") {
 		t.Fatal("prompt still invites a free-form category")
+	}
+}
+
+func TestConfiguredCategoryInPromptAndParse(t *testing.T) {
+	model.UseCategories([]string{"宠物", "外卖"})
+	t.Cleanup(func() { model.UseCategories(model.DefaultCategories()) })
+
+	p := visionPrompt()
+	for _, keep := range []string{"宠物", "外卖", "其他"} {
+		if !strings.Contains(p, keep) {
+			t.Fatalf("prompt missing %s\n%s", keep, p)
+		}
+	}
+	for _, drop := range []string{"餐饮", "工资", "房租"} {
+		if strings.Contains(p, drop) {
+			t.Fatalf("prompt still lists %s\n%s", drop, p)
+		}
+	}
+	loc := time.UTC
+	res, err := resultFromModelJSON("test", json.RawMessage(`{"is_bill":true,"amount":"1.00","category":"宠物","paid_at":"2026-10-26"}`), loc)
+	if err != nil || !res.IsBill || res.Category != "宠物" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	res, err = resultFromModelJSON("test", json.RawMessage(`{"is_bill":true,"amount":"1.00","category":"工资","paid_at":"2026-10-26"}`), loc)
+	if err != nil || !res.IsBill || res.Category != "其他" {
+		t.Fatalf("%+v %v", res, err)
 	}
 }
 

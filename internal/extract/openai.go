@@ -17,12 +17,12 @@ import (
 
 // visionPrompt asks for one JSON object. Vendor models sometimes wrap it in
 // markdown; the parser strips a single fenced block. category is not a free
-// label: the schema enum is model.Categories, and unsure output must be 其他.
+// label: the schema enum is the effective category list, and unsure output must be 其他.
 func visionPrompt() string {
 	schema, err := json.Marshal(struct {
 		Type string   `json:"type"`
 		Enum []string `json:"enum"`
-	}{Type: "string", Enum: model.Categories})
+	}{Type: "string", Enum: model.Categories()})
 	if err != nil {
 		// Categories is a fixed []string; marshal cannot fail.
 		schema = []byte(`{"type":"string","enum":["其他"]}`)
