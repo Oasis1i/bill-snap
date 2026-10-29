@@ -26,8 +26,8 @@ const billColumns = `id, amount_cents, currency, merchant, category, paid_at, no
 // so callers cannot drift from the documented key.
 // OrderNo is normalized before it is stored. PaidAtDefaulted records that
 // PaidAt was filled with the upload time because the model omitted it.
-// Category is normalized to model.Categories. Empty or unknown values,
-// including close variants, are stored as 其他.
+// Category is normalized to the effective category list. Empty or unknown
+// values, including close variants, are stored as 其他.
 type NewBill struct {
 	AmountCents     int64
 	Currency        string

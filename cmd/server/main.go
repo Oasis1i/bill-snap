@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Oasis1i/bill-snap/internal/api"
 	"github.com/Oasis1i/bill-snap/internal/config"
 	"github.com/Oasis1i/bill-snap/internal/extract"
+	"github.com/Oasis1i/bill-snap/internal/model"
 	"github.com/Oasis1i/bill-snap/internal/store"
 	"github.com/Oasis1i/bill-snap/internal/version"
 )
@@ -33,6 +35,7 @@ func run() error {
 	if err := cfg.ValidateForServer(); err != nil {
 		return err
 	}
+	model.UseCategories(cfg.Categories)
 	if len(cfg.UploadToken) < 8 || cfg.UploadToken == "change-me" {
 		slog.Warn("UPLOAD_TOKEN looks weak; use a long random value before exposing the server")
 	}
@@ -80,7 +83,7 @@ func run() error {
 	defer stop()
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", cfg.HTTPAddr, "provider", cfg.VisionProvider, "db", cfg.DBPath)
+		slog.Info("listening", "addr", cfg.HTTPAddr, "provider", cfg.VisionProvider, "db", cfg.DBPath, "categories", strings.Join(cfg.Categories, ","))
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

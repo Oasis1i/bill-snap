@@ -186,6 +186,37 @@ func TestInsertNormalizesCategory(t *testing.T) {
 	}
 }
 
+func TestInsertUsesConfiguredCategories(t *testing.T) {
+	model.UseCategories([]string{"宠物"})
+	t.Cleanup(func() { model.UseCategories(model.DefaultCategories()) })
+	st := openTest(t)
+	ctx := context.Background()
+	paid := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+
+	kept, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 100,
+		Currency:    "CNY",
+		Merchant:    "宠物店",
+		Category:    " 宠物 ",
+		PaidAt:      paid,
+		ContentHash: strings.Repeat("4", 64),
+	})
+	if err != nil || dup || kept.Category != "宠物" {
+		t.Fatalf("%+v dup=%v err=%v", kept, dup, err)
+	}
+	dropped, dup, err := st.InsertBill(ctx, NewBill{
+		AmountCents: 200,
+		Currency:    "CNY",
+		Merchant:    "美团外卖",
+		Category:    "外卖",
+		PaidAt:      paid,
+		ContentHash: strings.Repeat("5", 64),
+	})
+	if err != nil || dup || dropped.Category != "其他" {
+		t.Fatalf("%+v dup=%v err=%v", dropped, dup, err)
+	}
+}
+
 func TestOpenDefaultsToShanghai(t *testing.T) {
 	st := openTest(t)
 	if st.loc == nil || st.loc.String() != "Asia/Shanghai" {

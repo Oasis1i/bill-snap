@@ -25,7 +25,8 @@ type Extractor interface {
 // AmountCents is that value in minor units (fen, cents).
 // OrderNo is the normalized order or transaction number, or empty.
 // PaidAtDefaulted is true when the model omitted paid_at and PaidAt is the upload time.
-// Category is one of model.Categories. Empty or unknown model output is 其他.
+// Category is one of the effective category list (model.Categories).
+// Empty or unknown model output is 其他.
 type Result struct {
 	IsBill          bool
 	Amount          string

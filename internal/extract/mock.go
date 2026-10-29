@@ -26,8 +26,8 @@ const minBillSide = 64
 
 // catalog is the fixed demo set. The mock picks an entry from the image hash,
 // so the same bytes always produce the same merchant and category.
-// Each category is a member of model.Categories; the extractor does not
-// invent a label.
+// Each category is one of the built-in defaults. NormalizeCategory maps a
+// label that the configured list removed onto 其他.
 var catalog = []struct {
 	Merchant string
 	Category string
