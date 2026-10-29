@@ -86,7 +86,11 @@ assert created["duplicate"] is False
 assert created["stored"] is True
 bill = created["bill"]
 assert bill["currency"] == "CNY" and bill["amount_cents"] > 0
-print("created", bill["id"], bill["category"], bill["amount"], bill["merchant"], bill["paid_at"])
+yuan = f"{bill['amount_cents'] // 100}.{bill['amount_cents'] % 100:02d}"
+assert bill["amount"] == yuan, bill
+assert bill["category"]
+assert "mock extractor" not in body
+print("created", bill["id"], bill["category"], bill["amount"])
 
 code, body = curl(["-H", f"Authorization: Bearer {token}", "-F", f"image=@{tmp}/bill.png;type=image/png", f"{base}/api/v1/upload"])
 assert code == 200, (code, body)
@@ -97,7 +101,9 @@ assert dup["bill"]["id"] == bill["id"]
 code, body = curl(["-H", f"Authorization: Bearer {token}", "-F", f"image=@{tmp}/blank.png;type=image/png", f"{base}/api/v1/upload"])
 assert code == 200, (code, body)
 nb = json.loads(body)
-assert nb["is_bill"] is False and nb["stored"] is False and nb["reason"]
+assert nb["is_bill"] is False and nb["stored"] is False and nb["reason"] == "图片几乎是纯色"
+assert nb["notes"] == nb["reason"]
+assert "solid" not in body and "receipt" not in body
 
 cat = quote(bill["category"])
 code, body = curl(["-H", f"X-API-Token: {token}", f"{base}/api/v1/bills?from=2026-01-01&to=2026-12-31&category={cat}"])

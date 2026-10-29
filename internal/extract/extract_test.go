@@ -137,6 +137,9 @@ func TestOpenAICompatibleParse(t *testing.T) {
 		if !bytes.Contains(body, []byte(`\"enum\"`)) || !bytes.Contains(body, []byte("Do not invent a label")) {
 			t.Errorf("prompt missing closed category schema")
 		}
+		if !bytes.Contains(body, []byte("这张图不是付款账单")) || !bytes.Contains(body, []byte("聊天截图")) || !bytes.Contains(body, []byte("Do not write English in notes")) {
+			t.Errorf("prompt missing chinese non-bill notes rule")
+		}
 		inner := `{"is_bill":true,"amount":"18.50","currency":"CNY","merchant":"美团外卖","category":"外卖","paid_at":"2026-10-26T12:34:00+08:00","order_no":" 20261026-001 ","confidence":0.8,"notes":"ok"}`
 		writeChoice(w, "```json\n"+inner+"\n```")
 	}))

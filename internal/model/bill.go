@@ -1,7 +1,9 @@
 package model
 
 // Bill is one stored payment receipt.
-// Amount is major units as a decimal string ("18.50"). AmountCents is minor units.
+// Amount is yuan as a two-decimal string ("25.90") for clients that display
+// the value directly. AmountCents is the same value in fen and stays for
+// older clients. Storage is still amount_cents.
 // PaidAt, CreatedAt, and UpdatedAt are UTC RFC3339. PaidAt is truncated to the minute.
 // OrderNo is the normalized order or transaction number, or empty when the
 // screenshot did not show one. PaidAtDefaulted is true when PaidAt was filled

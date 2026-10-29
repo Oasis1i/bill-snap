@@ -81,7 +81,7 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 - `limit`：只对列表有效，1 到 500，默认 100。
 - 不带参数表示全部时间。
 
-金额以「分」存在 `amount_cents`，同时给十进制字符串 `amount`（`18.50`）。时间以 UTC RFC3339 存储，精度到分钟。
+库存仍是「分」`amount_cents`。HTTP 账单对象同时给元，字段名 `amount`，两位小数字符串（`25.90`）。快捷指令直接显示这个字符串，不要再除以 100。`amount_cents` 留着给旧客户端。时间以 UTC RFC3339 存储，精度到分钟。
 
 ### HTTP 状态
 
@@ -112,10 +112,16 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 
 识别失败的 `error`：`extract_timeout`（超时）、`extract_bad_response`（结果无法解析）、`extract_provider_error`（供应商报错）、`extract_not_configured`（未配置）、`extract_failed`（其他）。供应商原文只进服务器日志，并会截断、去掉密钥。上传还会见到 `bad_image_type`、`empty_image`、`missing_image`、`invalid_form`、`missing_paid_at`、`negative_amount`、`store_read_failed`、`image_save_failed`、`store_write_failed`，`message` 都是一句中文。列表和汇总失败也是这个形状。
 
-不是账单时仍是 200。`reason` 同样是短短语：模型没写 `notes` 时为「这张图不是付款账单」；mock 的固定说明会收成「图片几乎是纯色」「图片太小」「图片无法解码」。模型原文里中文逗号之后的内容会被丢掉，句号也会去掉。`notes` 是抽取器原文（密钥样式的片段会抹掉），通知不要用它。
+失败时的 `message`，以及不是账单时的 `reason` / `notes`，都是短中文：写到第一个逗号为止，不加句号，也不含英文句子。图片类型不对是「图片格式不支持」，日期格式不对是「日期格式不对」。
+
+不是账单时仍是 200。模型没写 `notes`，或写了英文（例如 “This is a screenshot, not a bill.”），`reason` 都是「这张图不是付款账单」。常见英文会收成更短的一句：「聊天截图」「主屏幕截图」「风景照片」「图片几乎是纯色」「图片太小」「图片无法解码」「图片是空的」。`notes` 与 `reason` 相同，不再回传抽取器原文。原文只进服务器日志。
 
 ```json
-{"is_bill":false,"duplicate":false,"stored":false,"reason":"图片几乎是纯色","notes":"image is nearly a solid color, so it was not treated as a receipt"}
+{"is_bill":false,"duplicate":false,"stored":false,"reason":"这张图不是付款账单","notes":"这张图不是付款账单"}
+```
+
+```json
+{"is_bill":false,"duplicate":false,"stored":false,"reason":"图片几乎是纯色","notes":"图片几乎是纯色"}
 ```
 
 快捷指令应把所有 2xx 当「请求被理解」，再看 `is_bill`，不要把「不是账单」当成网络错误。非 2xx 通知读 `message`；不是账单通知读 `reason`。
@@ -149,7 +155,17 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 - Body：表单（Form），文件字段名必须是 `image`
 - 类型：png、jpeg 或 webp
 
-快捷指令里用「获取 URL 内容」：方法 POST，请求体选「表单」，字段 `image` 选刚才的截图。成功后读 JSON 里的 `bill.merchant`、`bill.amount`。不是账单读 `reason`（空备注时是中文）。失败读 `message`，用那一句中文做通知，不要把整段 JSON 或 `error` 码展示给用户。
+快捷指令里用「获取 URL 内容」：方法 POST，请求体选「表单」，字段 `image` 选刚才的截图。通知只拼两段：
+
+- 成功或重复：`bill.amount`（元，例如 `25.90`）和 `bill.category`（例如 `餐饮`）。不要读 `bill.merchant`，也不要读 `bill.amount_cents`。
+- 不是账单：`reason`（短中文，例如 `这张图不是付款账单`）。
+- 失败：`message`（短中文，例如 `未授权`、`识别超时`）。不要把整段 JSON 或 `error` 码展示给用户。
+
+成功时响应里金额长这样（其余字段仍在。`merchant` 留给存储和 MCP，通知不用。`raw_model_json` 不出现在 HTTP 里，原文留在库中）：
+
+```json
+{"is_bill":true,"duplicate":false,"stored":true,"bill":{"amount":"25.90","amount_cents":2590,"category":"餐饮","currency":"CNY","merchant":"沙县小吃"}}
+```
 
 同一张图传两次是安全的，第二次会带回已有记录。
 
@@ -175,7 +191,7 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 
    两边都有单号而且不一样时，不用这一条把它们并掉。若这个支付键已经属于另一张单，第二笔改存另一个键：在上面的材料后面再加 `|<normalized order_no>` 再做 SHA-256。
 
-4. **缺省支付时间，按本地日合并**。模型没给 `paid_at` 时，用上传时刻（再截断到分钟），`note` 里附上 `paid_at missing; defaulted to upload time`，并把 `paid_at_defaulted` 记为 1。这一张的时间是缺省的，或者库里那一行是缺省的，只要金额、货币、归一化商家相同，并且支付日落在 `APP_TZ`（默认 `Asia/Shanghai`）的同一天，就视为同一笔。两边都有真实时间时，不会因为「同一天」并在一起。两边都有单号而且不一样时，也不走这一条，避免把同日同店同金额的两笔订单并掉。同一天有多笔候选时，命中 `id` 最小的那一笔。
+4. **缺省支付时间，按本地日合并**。模型没给 `paid_at` 时，用上传时刻（再截断到分钟），库里的 `note` 仍附上 `paid_at missing; defaulted to upload time`，并把 `paid_at_defaulted` 记为 1。HTTP 返回给手机时这句改成「未识别到支付时间」，避免通知里出现英文。旧库回填仍认库里的英文原句。这一张的时间是缺省的，或者库里那一行是缺省的，只要金额、货币、归一化商家相同，并且支付日落在 `APP_TZ`（默认 `Asia/Shanghai`）的同一天，就视为同一笔。两边都有真实时间时，不会因为「同一天」并在一起。两边都有单号而且不一样时，也不走这一条，避免把同日同店同金额的两笔订单并掉。同一天有多笔候选时，命中 `id` 最小的那一笔。
 
 已有数据库在启动时补两列：`order_no`（可空）、`paid_at_defaulted`（整数，默认 0）。`CREATE TABLE IF NOT EXISTS` 不会给旧表加列，所以启动时看 `PRAGMA table_info`，缺了再 `ALTER TABLE`。旧行的 `note` 里如果有那句缺省说明，会把 `paid_at_defaulted` 回填成 1。从冷备份恢复的旧库同样在下次启动时补列。
 
@@ -198,7 +214,7 @@ Mock 的日期不是「今天」。查询用 2026 年，或用上传响应里的
 
 ## 真实视觉接口
 
-`qwen`、`doubao`、`glm`（以及 `tongyi`、`ark`、`zhipu` 这些别名）走同一个 `Extractor` 接口：`POST {VISION_BASE_URL}/chat/completions`，OpenAI 风格的 text + `image_url` data URL，Bearer key。提示词要求模型只回一个 JSON 对象，并且 `category` 只能是「分类」一节里的那几个字符串，拿不准就填 `其他`。
+`qwen`、`doubao`、`glm`（以及 `tongyi`、`ark`、`zhipu` 这些别名）走同一个 `Extractor` 接口：`POST {VISION_BASE_URL}/chat/completions`，OpenAI 风格的 text + `image_url` data URL，Bearer key。提示词要求模型只回一个 JSON 对象，并且 `category` 只能是「分类」一节里的那几个字符串，拿不准就填 `其他`。不是账单时，`notes` 必须是一句短中文（聊天截图、空白图片、主屏幕截图、风景照片、这张图不是付款账单之一），不能写英文。就算模型仍回英文，接口也会改写成上面的短中文再给手机。
 
 这是可编译的薄客户端，**还没对着真实账号调通**。缺 key 时进程拒绝启动，避免静默落到一个坏配置。豆包还要自己的 endpoint id。供应商如果包一层 markdown，解析器会剥一层；若字段名不同，改 `internal/extract/openai.go` 里的 prompt 和 `visionPayload`。
 
