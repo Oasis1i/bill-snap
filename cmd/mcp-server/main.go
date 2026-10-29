@@ -32,6 +32,6 @@ func run() error {
 	defer st.Close()
 	st.SetLocation(cfg.Location)
 	model.UseCategories(cfg.Categories)
-	slog.Info("bill-snap mcp", "db", cfg.DBPath, "tz", cfg.Timezone, "categories", strings.Join(cfg.Categories, ","))
-	return mcp.Serve(os.Stdin, os.Stdout, st, cfg.Location)
+	slog.Info("bill-snap mcp", "db", cfg.DBPath, "uploads", cfg.UploadDir, "tz", cfg.Timezone, "categories", strings.Join(cfg.Categories, ","))
+	return mcp.Serve(os.Stdin, os.Stdout, st, cfg.Location, cfg.UploadDir)
 }

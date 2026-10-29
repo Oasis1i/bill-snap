@@ -16,7 +16,9 @@ import (
 )
 
 // Serve reads MCP messages from r and writes responses to w until r hits EOF.
-func Serve(r io.Reader, w io.Writer, st *store.Store, loc *time.Location) error {
+// uploadDir is the only directory get_bill_image will read. An empty
+// directory disables image reads, and list_bills then reports has_image false.
+func Serve(r io.Reader, w io.Writer, st *store.Store, loc *time.Location, uploadDir string) error {
 	bw := bufio.NewWriter(w)
 	defer bw.Flush()
 	sc := bufio.NewScanner(r)
@@ -26,7 +28,7 @@ func Serve(r io.Reader, w io.Writer, st *store.Store, loc *time.Location) error 
 		if len(line) == 0 {
 			continue
 		}
-		body, _, notification := handleMessage(context.Background(), st, loc, line)
+		body, _, notification := handleMessage(context.Background(), st, loc, uploadDir, line)
 		if notification {
 			continue
 		}

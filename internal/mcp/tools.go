@@ -3,7 +3,9 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -31,6 +33,11 @@ const (
 	msgBadArgs     = "参数不正确"
 	msgUnknown     = "未知工具"
 	msgQuery       = "查询账单失败"
+	msgBadID       = "参数 id 无效"
+	msgBillMissing = "找不到这笔账单"
+	msgNoImage     = "这笔没有截图"
+	msgImageGone   = "截图文件已丢失"
+	msgImageBad    = "截图无法读取"
 )
 
 func toolDefs() []map[string]any {
@@ -91,6 +98,21 @@ func toolDefs() []map[string]any {
 				"properties": map[string]any{},
 			},
 		},
+		{
+			"name":        "get_bill_image",
+			"description": "返回 list_bills 查到的某一笔账单的原始付款截图。id 是该账单编号。图片最长边不超过 1024 像素且不会放大，并附带日期、分类和金额",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "账单编号 来自 list_bills 返回的 id",
+					},
+				},
+				"required": []string{"id"},
+			},
+		},
 	}
 }
 
@@ -103,8 +125,10 @@ func dateProperty(desc string) map[string]any {
 }
 
 type toolContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 type toolResult struct {
@@ -119,6 +143,11 @@ type billItem struct {
 	Category string `json:"category"`
 	Merchant string `json:"merchant"`
 	Note     string `json:"note"`
+	// HasImage is true only when image_path is non-empty and the file is a
+	// regular file that still resolves inside the configured upload directory.
+	// A missing file or a path outside that directory is false. The path
+	// itself is not returned.
+	HasImage bool `json:"has_image"`
 }
 
 type billListResult struct {
@@ -144,7 +173,7 @@ type categoryResult struct {
 	Categories []string `json:"categories"`
 }
 
-func callTool(ctx context.Context, st *store.Store, loc *time.Location, params json.RawMessage) toolResult {
+func callTool(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, params json.RawMessage) toolResult {
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -162,17 +191,19 @@ func callTool(ctx context.Context, st *store.Store, loc *time.Location, params j
 	}
 	switch call.Name {
 	case "list_bills":
-		return listBills(ctx, st, loc, call.Arguments)
+		return listBills(ctx, st, loc, uploadDir, call.Arguments)
 	case "summarize_spend":
 		return summarizeSpend(ctx, st, loc, call.Arguments)
 	case "list_categories":
 		return toolJSON(categoryResult{Categories: model.Categories()})
+	case "get_bill_image":
+		return getBillImage(ctx, st, loc, uploadDir, call.Arguments)
 	default:
 		return toolError(msgUnknown)
 	}
 }
 
-func listBills(ctx context.Context, st *store.Store, loc *time.Location, raw json.RawMessage) toolResult {
+func listBills(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, raw json.RawMessage) toolResult {
 	var args struct {
 		From     string          `json:"from"`
 		To       string          `json:"to"`
@@ -217,9 +248,82 @@ func listBills(ctx context.Context, st *store.Store, loc *time.Location, raw jso
 			Category: b.Category,
 			Merchant: visibleText(b.Merchant, b.ImagePath, b.RawModelJSON),
 			Note:     visibleText(b.Note, b.ImagePath, b.RawModelJSON),
+			HasImage: hasBillImage(uploadDir, b.ImagePath),
 		})
 	}
 	return toolJSON(billListResult{Count: len(items), Bills: items})
+}
+
+func getBillImage(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, raw json.RawMessage) toolResult {
+	id, msg := resolveBillID(raw)
+	if msg != "" {
+		return toolError(msg)
+	}
+	if st == nil {
+		slog.Error("mcp image", "err", "nil store")
+		return toolError(msgQuery)
+	}
+	bill, found, err := st.FindByID(ctx, id)
+	if err != nil {
+		slog.Error("mcp image", "id", id, "err", err)
+		return toolError(msgQuery)
+	}
+	if !found {
+		return toolError(msgBillMissing)
+	}
+	data, err := readBillImage(uploadDir, bill.ImagePath)
+	if err != nil {
+		if errors.Is(err, errEscape) {
+			slog.Warn("mcp image rejected", "id", id, "reason", "outside upload dir")
+		}
+		return imageReadError(err)
+	}
+	encoded, mime, err := encodeBillImage(data)
+	if err != nil {
+		slog.Error("mcp image decode", "id", id, "err", err)
+		return toolError(msgImageBad)
+	}
+	return toolResult{Content: []toolContent{
+		{
+			Type:     "image",
+			Data:     base64.StdEncoding.EncodeToString(encoded),
+			MimeType: mime,
+		},
+		{Type: "text", Text: imageCaption(bill, loc)},
+	}}
+}
+
+func imageReadError(err error) toolResult {
+	switch {
+	case errors.Is(err, errNoImage):
+		return toolError(msgNoImage)
+	case errors.Is(err, errEscape), errors.Is(err, errMissing):
+		return toolError(msgImageGone)
+	default:
+		return toolError(msgImageBad)
+	}
+}
+
+func resolveBillID(raw json.RawMessage) (int64, string) {
+	var args struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return 0, msgBadID
+	}
+	idRaw := bytes.TrimSpace(args.ID)
+	if len(idRaw) == 0 || string(idRaw) == "null" {
+		return 0, msgBadID
+	}
+	var n int64
+	if err := json.Unmarshal(idRaw, &n); err != nil || n < 1 {
+		return 0, msgBadID
+	}
+	return n, ""
+}
+
+func imageCaption(b model.Bill, loc *time.Location) string {
+	return formatDay(b.PaidAt, loc) + " " + strings.TrimSpace(b.Category) + " " + yuan(b) + " 元"
 }
 
 func summarizeSpend(ctx context.Context, st *store.Store, loc *time.Location, raw json.RawMessage) toolResult {
