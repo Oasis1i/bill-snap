@@ -26,6 +26,8 @@ const billColumns = `id, amount_cents, currency, merchant, category, paid_at, no
 // so callers cannot drift from the documented key.
 // OrderNo is normalized before it is stored. PaidAtDefaulted records that
 // PaidAt was filled with the upload time because the model omitted it.
+// Category is normalized to model.Categories. Empty or unknown values,
+// including close variants, are stored as 其他.
 type NewBill struct {
 	AmountCents     int64
 	Currency        string
@@ -42,7 +44,8 @@ type NewBill struct {
 
 // ListFilter selects bills.
 // From is inclusive. To is exclusive. Both are compared to paid_at stored as
-// UTC RFC3339. Category is an exact match when non-empty.
+// UTC RFC3339. Category is an exact match when non-empty. It is not rewritten
+// onto the fixed enum, so an unknown filter matches nothing.
 type ListFilter struct {
 	From     *time.Time
 	To       *time.Time
@@ -355,7 +358,7 @@ func prepareBill(in NewBill) (preparedBill, error) {
 		Currency:        currency,
 		Merchant:        merchant,
 		MerchantKey:     model.NormalizeMerchant(merchant),
-		Category:        strings.TrimSpace(in.Category),
+		Category:        model.NormalizeCategory(in.Category),
 		PaidAt:          paid,
 		PaidStr:         paid.Format(time.RFC3339),
 		Note:            strings.TrimSpace(in.Note),

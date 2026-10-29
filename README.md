@@ -76,7 +76,7 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 ### 查询参数
 
 - `from`、`to`：`YYYY-MM-DD`（按 `APP_TZ` 的整天，含首尾）或 RFC3339 时刻（`from` 含，`to` 含该秒）。
-- `category`：精确匹配，例如 `外卖`。
+- `category`：精确匹配固定分类里的一项，例如 `外卖`。见「分类」。
 - `limit`：只对列表有效，1 到 500，默认 100。
 - 不带参数表示全部时间。
 
@@ -100,6 +100,18 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 ```
 
 快捷指令应把所有 2xx 当「请求被理解」，再看 `is_bill`，不要把「不是账单」当成网络错误。
+
+## 分类
+
+分类是闭集，视觉模型不能另起标签。唯一来源是 `internal/model` 里的 `Categories`。允许的字符串必须逐字相同：
+
+外卖、餐饮、交通、日用、购物、房租、工资、娱乐、医疗、其他
+
+提示词把这个列表写成 JSON schema 的 `enum`。对不上就填 `其他`。抽出 JSON 之后再归一一次：去掉首尾空白；空字符串、`null`、非字符串、不在列表里的值，以及相近写法（多几个字、中间夹空格、英文名）都改成 `其他`。上传不会因为分类对不上而失败。原始模型 JSON 仍留在 `raw_model_json`。
+
+入库时再走同一套归一，避免绕过抽取器时写进自由文本。查询参数不做这步映射，仍然是精确匹配；`外卖配送` 不会被当成 `外卖`。
+
+库里已有的 `外卖`、`购物` 都在这张表里，不加 CHECK，也不做迁移。
 
 ## iPhone 快捷指令
 
@@ -152,7 +164,7 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 3. 采样后的 8-bit 亮度标准差 `< 12` → 不是账单（纯色、近纯色、白屏）。
 4. 否则是账单。字段只由图片 SHA-256 决定，同一文件永远得到同一结果：
    - 金额：`100 * (1 + hash[1] % 200)` 分，也就是 1.00 到 200.00 CNY
-   - 商家 / 分类：`美团外卖/外卖`、`饿了么/外卖`、`瑞幸咖啡/餐饮`、`星巴克/餐饮`、`滴滴出行/交通`、`盒马鲜生/日用`、`淘宝/购物` 里按 `hash[2]` 取一项
+   - 商家 / 分类：`美团外卖/外卖`、`饿了么/外卖`、`瑞幸咖啡/餐饮`、`星巴克/餐饮`、`滴滴出行/交通`、`盒马鲜生/日用`、`淘宝/购物` 里按 `hash[2]` 取一项。分类都来自上面的固定列表，mock 不会自造标签
    - 订单号：`M` 加上 SHA-256 前 6 字节的大写十六进制。每张图不同，所以 mock 不会靠订单号把两张不同的图并成一笔
    - 支付时间：`2026-01-01 12:00 UTC` 再加 `hash[0] % 365` 天。mock 总会给时间，所以 `paid_at_defaulted` 是 0
 
@@ -160,7 +172,7 @@ Mock 的日期不是「今天」。查询用 2026 年，或用上传响应里的
 
 ## 真实视觉接口
 
-`qwen`、`doubao`、`glm`（以及 `tongyi`、`ark`、`zhipu` 这些别名）走同一个 `Extractor` 接口：`POST {VISION_BASE_URL}/chat/completions`，OpenAI 风格的 text + `image_url` data URL，Bearer key。提示词要求模型只回一个 JSON 对象。
+`qwen`、`doubao`、`glm`（以及 `tongyi`、`ark`、`zhipu` 这些别名）走同一个 `Extractor` 接口：`POST {VISION_BASE_URL}/chat/completions`，OpenAI 风格的 text + `image_url` data URL，Bearer key。提示词要求模型只回一个 JSON 对象，并且 `category` 只能是「分类」一节里的那几个字符串，拿不准就填 `其他`。
 
 这是可编译的薄客户端，**还没对着真实账号调通**。缺 key 时进程拒绝启动，避免静默落到一个坏配置。豆包还要自己的 endpoint id。供应商如果包一层 markdown，解析器会剥一层；若字段名不同，改 `internal/extract/openai.go` 里的 prompt 和 `visionPayload`。
 
@@ -197,7 +209,7 @@ Nori / Coin 以后只要支持自定义 MCP stdio，配成类似这样即可（�
 }
 ```
 
-助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，`category` 填 `外卖`。
+助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，`category` 填 `外卖`。`category` 的 schema 是同一份固定列表，不能填列表以外的词。
 
 ## 部署（只是轮廓）
 
@@ -292,7 +304,7 @@ internal/api/          路由、鉴权、上传和查询
 internal/store/        SQLite。schema 的嵌入副本
 internal/extract/      Extractor、mock、通义/豆包/智谱客户端
 internal/config/       环境变量和 .env
-internal/model/        金额、去重键、订单号、时间范围
+internal/model/        金额、分类、去重键、订单号、时间范围
 schema.sql             与 internal/store/schema.sql 保持一致
 .env.example
 scripts/smoke.sh         curl + MCP 冒烟

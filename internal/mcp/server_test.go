@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Oasis1i/bill-snap/internal/model"
 	"github.com/Oasis1i/bill-snap/internal/store"
 )
 
@@ -89,6 +90,19 @@ func TestServeListAndSummary(t *testing.T) {
 	tools := byID[2]["result"].(map[string]any)["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatal(tools)
+	}
+	for _, tool := range tools {
+		schema := tool.(map[string]any)["inputSchema"].(map[string]any)
+		props := schema["properties"].(map[string]any)
+		enum := props["category"].(map[string]any)["enum"].([]any)
+		if len(enum) != len(model.Categories) {
+			t.Fatalf("category enum %v", enum)
+		}
+		for i, c := range model.Categories {
+			if enum[i] != c {
+				t.Fatalf("enum[%d]=%v want %s", i, enum[i], c)
+			}
+		}
 	}
 	sumText := byID[3]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	var sum struct {

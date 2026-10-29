@@ -16,9 +16,18 @@ import (
 )
 
 // visionPrompt asks for one JSON object. Vendor models sometimes wrap it in
-// markdown; the parser strips a single fenced block. Tune this text per vendor
-// once a real key is available — it is intentionally generic.
-const visionPrompt = `You extract payment receipts from screenshots for a personal expense tracker.
+// markdown; the parser strips a single fenced block. category is not a free
+// label: the schema enum is model.Categories, and unsure output must be 其他.
+func visionPrompt() string {
+	schema, err := json.Marshal(struct {
+		Type string   `json:"type"`
+		Enum []string `json:"enum"`
+	}{Type: "string", Enum: model.Categories})
+	if err != nil {
+		// Categories is a fixed []string; marshal cannot fail.
+		schema = []byte(`{"type":"string","enum":["其他"]}`)
+	}
+	return `You extract payment receipts from screenshots for a personal expense tracker.
 Reply with one JSON object and no markdown.
 Schema:
 {"is_bill":true,"amount":"12.34","currency":"CNY","merchant":"","category":"外卖","paid_at":"2026-10-26T12:30:00+08:00","order_no":"","confidence":0.0,"notes":""}
@@ -27,8 +36,9 @@ Rules:
 - amount is major currency units, not cents. Example: 18.5 yuan is "18.50".
 - paid_at is RFC3339 with a numeric offset when the receipt shows a time. Use YYYY-MM-DD when only a date is visible. Leave paid_at empty when no date or time is visible. Do not invent a time.
 - order_no is the payment's order or transaction number when one is visible (订单号, 交易单号, 商户单号, 订单编号, 交易号, 商户订单号). If several are visible, prefer 交易单号, then 订单号, then 商户单号. Copy the number as printed. Leave order_no empty when none is visible. Do not invent one.
-- category is a short Chinese label such as 外卖, 餐饮, 交通, 日用, 购物, or 其他.
+- category must match this schema exactly: ` + string(schema) + `. If you are unsure which label fits, use ` + model.CategoryOther + `. Do not invent a label, do not translate it, and do not return a close variant.
 - confidence is from 0 to 1.`
+}
 
 // openAICompat is a thin client for 通义 VL, 豆包, and 智谱 GLM-4V style
 // OpenAI-compatible vision endpoints. It is not wired to a chatbot subscription.
@@ -56,7 +66,7 @@ func (o *openAICompat) Extract(ctx context.Context, imageBytes []byte, mime stri
 		Messages: []chatMessage{{
 			Role: "user",
 			Content: []chatPart{
-				{Type: "text", Text: visionPrompt},
+				{Type: "text", Text: visionPrompt()},
 				{Type: "image_url", ImageURL: &chatImageURL{
 					URL: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(imageBytes),
 				}},
@@ -142,7 +152,7 @@ type visionPayload struct {
 	Amount          json.RawMessage `json:"amount"`
 	Currency        string          `json:"currency"`
 	Merchant        string          `json:"merchant"`
-	Category        string          `json:"category"`
+	Category        flexCategory    `json:"category"`
 	PaidAt          string          `json:"paid_at"`
 	OrderNo         flexString      `json:"order_no"`
 	TransactionNo   flexString      `json:"transaction_no"`
@@ -158,6 +168,28 @@ type visionPayload struct {
 	TradeNoCN       flexString      `json:"交易号"`
 	Confidence      float64         `json:"confidence"`
 	Notes           string          `json:"notes"`
+}
+
+// flexCategory accepts a JSON string. Null and non-strings become empty so
+// NormalizeCategory can map them to 其他 instead of failing the upload.
+type flexCategory string
+
+func (c *flexCategory) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*c = ""
+		return nil
+	}
+	if data[0] != '"' {
+		*c = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*c = flexCategory(s)
+	return nil
 }
 
 // flexString accepts a JSON string or number. Receipt models sometimes emit
@@ -237,7 +269,7 @@ func resultFromModelJSON(provider string, raw json.RawMessage, loc *time.Locatio
 			IsBill:     false,
 			Currency:   strings.ToUpper(strings.TrimSpace(payload.Currency)),
 			Merchant:   strings.TrimSpace(payload.Merchant),
-			Category:   strings.TrimSpace(payload.Category),
+			Category:   model.NormalizeCategory(string(payload.Category)),
 			Confidence: payload.Confidence,
 			Notes:      notes,
 			RawJSON:    raw,
@@ -274,7 +306,7 @@ func resultFromModelJSON(provider string, raw json.RawMessage, loc *time.Locatio
 		AmountCents:     cents,
 		Currency:        currency,
 		Merchant:        strings.TrimSpace(payload.Merchant),
-		Category:        strings.TrimSpace(payload.Category),
+		Category:        model.NormalizeCategory(string(payload.Category)),
 		PaidAt:          paid,
 		PaidAtDefaulted: defaulted,
 		OrderNo:         firstOrderNo(payload),
