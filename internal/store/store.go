@@ -481,6 +481,11 @@ func (s *Store) FindByDedupKey(ctx context.Context, key string) (model.Bill, boo
 	return findOne(ctx, s.db, "dedup_key = ?", key)
 }
 
+// FindByID returns the bill with this primary key.
+func (s *Store) FindByID(ctx context.Context, id int64) (model.Bill, bool, error) {
+	return findOne(ctx, s.db, "id = ?", id)
+}
+
 type queryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)

@@ -71,6 +71,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/bills", s.withAuth(s.handleList))
 	mux.HandleFunc("GET /api/v1/summary", s.withAuth(s.handleSummary))
-	mux.Handle("/mcp", mcp.NewHandler(s.store, s.loc, s.mcpToken))
+	mux.Handle("/mcp", mcp.NewHandler(s.store, s.loc, s.mcpToken, s.uploadDir))
 	return recoverMiddleware(mux)
 }

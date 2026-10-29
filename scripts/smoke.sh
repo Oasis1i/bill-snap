@@ -151,7 +151,7 @@ fi
 
 echo "mcp..."
 python3 - "$TMP" <<'PY'
-import json, os, subprocess, sys
+import base64, json, os, subprocess, sys
 tmp = sys.argv[1]
 proc = subprocess.run(
     [f"{tmp}/bill-snap-mcp"],
@@ -161,6 +161,7 @@ proc = subprocess.run(
         json.dumps({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         json.dumps({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"summarize_spend","arguments":{"from":"2026-01-01","to":"2026-12-31"}}}),
         json.dumps({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_bills","arguments":{"from":"2026-01-01","to":"2026-12-31"}}}),
+        json.dumps({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_bill_image","arguments":{"id":1}}}),
     ]) + "\n",
     text=True,
     capture_output=True,
@@ -175,12 +176,21 @@ lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
 msgs = [json.loads(ln) for ln in lines]
 by_id = {m["id"]: m for m in msgs if "id" in m}
 names = {t["name"] for t in by_id[2]["result"]["tools"]}
-assert names == {"list_bills", "summarize_spend", "list_categories"}, names
+assert names == {"list_bills", "summarize_spend", "list_categories", "get_bill_image"}, names
 summary = json.loads(by_id[3]["result"]["content"][0]["text"])
 assert summary["count"] == 1 and summary["amount"], summary
 listed = json.loads(by_id[4]["result"]["content"][0]["text"])
 assert listed["count"] == 1, listed
+assert listed["bills"][0]["has_image"] is True
+assert listed["bills"][0]["id"] == 1
 assert "image_path" not in by_id[4]["result"]["content"][0]["text"]
+image = by_id[5]["result"]
+assert image.get("isError") is not True, image
+content = image["content"]
+assert content[0]["type"] == "image" and content[0]["mimeType"] == "image/png", content[0].get("mimeType")
+assert content[1]["type"] == "text" and listed["bills"][0]["category"] in content[1]["text"]
+raw = base64.b64decode(content[0]["data"])
+assert raw.startswith(b"\x89PNG\r\n\x1a\n")
 print("mcp ok", summary["amount"])
 PY
 

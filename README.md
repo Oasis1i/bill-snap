@@ -221,13 +221,17 @@ Mock 的日期不是「今天」。查询用 2026 年，或用上传响应里的
 
 ## MCP
 
-读和 HTTP 服务同一个 SQLite 文件。两套入口用同一份工具定义。协议版本认 `2025-06-18`、`2025-03-26`、`2024-11-05`。金额是元，两位小数字符串（`25.90`）。时间按 `APP_TZ`（默认 Asia/Shanghai）显示成 `YYYY-MM-DD HH:MM`。不返回截图路径，也不返回模型原文。
+读和 HTTP 服务同一个 SQLite 文件。两套入口用同一份工具定义。协议版本认 `2025-06-18`、`2025-03-26`、`2024-11-05`。金额是元，两位小数字符串（`25.90`）。时间按 `APP_TZ`（默认 Asia/Shanghai）显示成 `YYYY-MM-DD HH:MM`。列表不返回截图路径，也不返回模型原文。截图字节只出现在 `get_bill_image` 的结果里，没有单独的图片 URL。
 
 工具都是只读的：
 
-- `list_bills`：按日期列出明细。`from`、`to` 必填，`YYYY-MM-DD`，含首尾。`category` 可选，必须是当前分类之一。`limit` 可选，默认 50，超过 200 按 200。返回 `id`、`paid_at`、`amount`、`category`、`merchant`、`note`。
+- `list_bills`：按日期列出明细。`from`、`to` 必填，`YYYY-MM-DD`，含首尾。`category` 可选，必须是当前分类之一。`limit` 可选，默认 50，超过 200 按 200。返回 `id`、`paid_at`、`amount`、`category`、`merchant`、`note`、`has_image`。其余字段不变。`has_image` 为 true 的条件是：库里的 `image_path` 非空，并且该路径是普通文件，跟随符号链接之后仍然落在 `UPLOAD_DIR` 里面。路径为空、文件不在磁盘上、或解析后跑到上传目录外面（含 `../` 和指向外部的符号链接）时为 false。调用方看不到路径本身。
 - `summarize_spend`：按日期汇总。`from`、`to` 必填。`group_by` 是 `category`（默认）或 `day`。`include_income` 默认 false，为 false 时不算 `工资`。返回总额 `amount`（元）、`count`、`groups`（每组有金额和笔数）。
 - `list_categories`：无参数，返回当前生效的分类。
+- `get_bill_image`：返回 `list_bills` 里某一笔的原始付款截图。参数只有 `id`（整数，必填，就是列表里的 `id`，最小 1）。成功时 `content` 有两项，顺序固定：
+  - `image`：`data` 是标准 base64，`mimeType` 是 `image/png` 或 `image/jpeg`。最长边缩到不超过 1024 像素，保持宽高比，已经不超过 1024 的不放大。原来是 PNG 的仍输出 PNG，原来是 JPEG 的仍输出 JPEG。WebP 没有透明通道时输出 JPEG，有透明通道时输出 PNG。不超过 1024 且本身就是 PNG 或 JPEG 的，按原字节返回。
+  - `text`：一行 `YYYY-MM-DD 分类 金额 元`，例如 `2026-10-30 外卖 25.90 元`。日期按 `APP_TZ`。
+  失败是工具结果里的 `isError: true`，正文只有一句短中文：`参数 id 无效`（缺失、不是整数、或小于 1）、`找不到这笔账单`、`这笔没有截图`（路径为空）、`截图文件已丢失`（文件不存在，或解析后不在 `UPLOAD_DIR` 内）、`截图无法读取`（不是能解码的图片，或大到不能安全解码）。单边超过 32768 像素、或总像素超过 2000 万的文件会走最后这一句，避免把超大图整张解进内存。
 
 日期必须是 `YYYY-MM-DD`。开始晚于结束、跨度超过 366 天（含首尾）、分类不在列表里，都是工具结果里的 `isError: true`，正文是短中文，没有句号，也没有逗号后面的半句。未知分类会带上允许的列表。协议错误（解析失败、方法不存在）走 JSON-RPC `error`。
 
@@ -270,7 +274,7 @@ Cursor 或其他支持远程 MCP 的客户端可以这样接（公网把地址�
 
 ### 本机 stdio
 
-`cmd/mcp-server` 仍是一行一条 JSON-RPC。日志在 stderr。它**不校验** `UPLOAD_TOKEN` 或 `MCP_TOKEN`：能启动这个进程的人已经能读数据库文件。
+`cmd/mcp-server` 仍是一行一条 JSON-RPC。日志在 stderr。它**不校验** `UPLOAD_TOKEN` 或 `MCP_TOKEN`：能启动这个进程的人已经能读数据库文件。截图和远程接口用同一个 `UPLOAD_DIR`（默认 `data/uploads`）。相对路径按进程的工作目录解析，要和上传时一致；目录用绝对路径更稳。
 
 ```bash
 export DB_PATH=data/bills.db
@@ -289,6 +293,7 @@ Nori / Coin 以后只要支持自定义 MCP stdio，配成类似这样即可（�
       "command": "/absolute/path/to/bin/bill-snap-mcp",
       "env": {
         "DB_PATH": "/absolute/path/to/data/bills.db",
+        "UPLOAD_DIR": "/absolute/path/to/data/uploads",
         "APP_TZ": "Asia/Shanghai"
       }
     }
@@ -296,7 +301,7 @@ Nori / Coin 以后只要支持自定义 MCP stdio，配成类似这样即可（�
 }
 ```
 
-助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，再看 `groups` 里的 `外卖`。默认不含工资。`list_bills` 的 `category` schema 是当前生效的那份列表，不能填列表以外的词。
+助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，再看 `groups` 里的 `外卖`。默认不含工资。`list_bills` 的 `category` schema 是当前生效的那份列表，不能填列表以外的词。要看某一笔的截图时，先 `list_bills`，对 `has_image` 为 true 的行再调 `get_bill_image`，`id` 用列表里的编号。
 
 ## 部署（只是轮廓）
 
@@ -377,7 +382,7 @@ CRON_TZ=Asia/Shanghai
 ## 安全
 
 - 每个会读或写账单的 HTTP 接口都要 token。错 token 或缺失都是 401。
-- 截图是私人付款记录。没有不带鉴权的图片下载路由；文件只在服务器磁盘上。
+- 截图是私人付款记录。没有图片下载 URL；文件只在服务器磁盘上。`get_bill_image` 走原来的 `POST /mcp`，远程仍要 `MCP_TOKEN`。读文件前会 `EvalSymlinks`，再用 `filepath.Rel` 确认结果仍在 `UPLOAD_DIR` 内。目录外的路径和逃逸的符号链接都不会打开。
 - 默认只听 `127.0.0.1`。改成 `:8080` 之前先换掉 `change-me`。
 - 不要把 `.env`、`data/` 或 API key 提交进 git。冷备份只上传 SQLite 快照。
 - 远程 MCP 只在设置了 `MCP_TOKEN` 之后出现，并且只认这个 Bearer。不要把它和 `UPLOAD_TOKEN` 设成同一个值，也不要无鉴权地暴露 `POST /mcp`。

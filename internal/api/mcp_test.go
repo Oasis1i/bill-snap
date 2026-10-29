@@ -61,6 +61,15 @@ func TestMCPRouteUsesItsOwnToken(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unset token %d %s", rec.Code, rec.Body.String())
 	}
+
+	for _, path := range []string{"/uploads/secret.png", "/api/v1/bills/1/image", "/mcp/image"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func mcpPost(h http.Handler, token, body string) *httptest.ResponseRecorder {

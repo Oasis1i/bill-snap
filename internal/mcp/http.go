@@ -20,10 +20,11 @@ const maxBody = 1 << 20
 // sends one is still served, because this process never opened a session.
 // GET is 405. Responses are a single JSON object unless the client accepts
 // only text/event-stream, in which case the same object is one SSE event.
-func NewHandler(st *store.Store, loc *time.Location, token string) http.Handler {
+// uploadDir is the only directory get_bill_image will read.
+func NewHandler(st *store.Store, loc *time.Location, token, uploadDir string) http.Handler {
 	token = strings.TrimSpace(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveHTTP(w, r, st, loc, token)
+		serveHTTP(w, r, st, loc, token, uploadDir)
 	})
 }
 
@@ -32,7 +33,7 @@ type httpErrorBody struct {
 	Message string `json:"message"`
 }
 
-func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *time.Location, token string) {
+func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *time.Location, token, uploadDir string) {
 	if token == "" {
 		writeHTTPError(w, http.StatusNotFound, "not_found", "接口未启用")
 		return
@@ -69,7 +70,7 @@ func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *tim
 		writeRPC(w, http.StatusBadRequest, rpcFail(json.RawMessage("null"), codeBadReq, "请求过大"), false)
 		return
 	}
-	payload, status, notification := handleMessage(r.Context(), st, loc, bytes.TrimSpace(body))
+	payload, status, notification := handleMessage(r.Context(), st, loc, uploadDir, bytes.TrimSpace(body))
 	if notification {
 		w.WriteHeader(http.StatusAccepted)
 		return

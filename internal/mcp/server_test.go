@@ -74,7 +74,7 @@ func TestServeListAndSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := Serve(&in, &out, st, loc); err != nil {
+	if err := Serve(&in, &out, st, loc, ""); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -94,7 +94,16 @@ func TestServeListAndSummary(t *testing.T) {
 		t.Fatal(init)
 	}
 	tools := byID[2]["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 3 {
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.(map[string]any)["name"].(string)] = true
+	}
+	for _, name := range []string{"list_bills", "summarize_spend", "list_categories", "get_bill_image"} {
+		if !names[name] {
+			t.Fatalf("missing %s in %v", name, names)
+		}
+	}
+	if len(tools) != 4 {
 		t.Fatal(tools)
 	}
 	var listed map[string]any
@@ -151,6 +160,15 @@ func TestServeListAndSummary(t *testing.T) {
 	if listedBills.Count != 1 || listedBills.Bills[0].Amount != "35.00" || listedBills.Bills[0].PaidAt != "2026-10-26 20:30" || listedBills.Bills[0].Note != "午饭" {
 		t.Fatalf("%s", listText)
 	}
+	var rawList struct {
+		Bills []map[string]any `json:"bills"`
+	}
+	if err := json.Unmarshal([]byte(listText), &rawList); err != nil {
+		t.Fatal(err)
+	}
+	if rawList.Bills[0]["has_image"] != false {
+		t.Fatalf("has_image %v", rawList.Bills[0]["has_image"])
+	}
 	bad := byID[5]["result"].(map[string]any)
 	if bad["isError"] != true {
 		t.Fatal(byID[5])
@@ -202,7 +220,7 @@ func TestToolEnumFollowsConfiguredCategories(t *testing.T) {
 		in.WriteByte('\n')
 	}
 	var out bytes.Buffer
-	if err := Serve(&in, &out, st, time.UTC); err != nil {
+	if err := Serve(&in, &out, st, time.UTC, ""); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")

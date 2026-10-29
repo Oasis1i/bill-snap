@@ -75,6 +75,7 @@ func TestClientErrorPhrases(t *testing.T) {
 	phrases := []string{
 		msgBadDate, msgMissingFrom, msgMissingTo, msgRangeOrder, msgSpan,
 		msgBadLimit, msgBadGroup, msgBadArgs, msgUnknown, msgQuery,
+		msgBadID, msgBillMissing, msgNoImage, msgImageGone, msgImageBad,
 		"未知分类 允许" + strings.Join(allowedLabels(), "、"),
 		"请求无法解析", "请求格式不对", "方法不存在", "服务器出错",
 		"协议版本不支持", "请求过大", "接口未启用", "只支持POST", "未授权",
