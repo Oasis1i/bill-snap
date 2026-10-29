@@ -18,10 +18,6 @@ import (
 	"github.com/Oasis1i/bill-snap/internal/store"
 )
 
-type apiError struct {
-	Error string `json:"error"`
-}
-
 type uploadResponse struct {
 	IsBill      bool        `json:"is_bill"`
 	Duplicate   bool        `json:"duplicate"`
@@ -43,35 +39,35 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBytes+1<<20)
 	if err := r.ParseMultipartForm(s.maxBytes); err != nil {
 		if isTooLarge(err) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, apiError{Error: "image exceeds upload limit"})
+			writeError(w, http.StatusRequestEntityTooLarge, "image_too_large", msgImageTooLarge)
 			return
 		}
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid multipart form"})
+		writeError(w, http.StatusBadRequest, "invalid_form", msgInvalidForm)
 		return
 	}
 	f, _, err := r.FormFile("image")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: `missing form field "image"`})
+		writeError(w, http.StatusBadRequest, "missing_image", msgMissingImage)
 		return
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(io.LimitReader(f, s.maxBytes+1))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "could not read image"})
+		writeError(w, http.StatusBadRequest, "unreadable_image", msgUnreadableImage)
 		return
 	}
 	if int64(len(data)) > s.maxBytes {
-		writeJSON(w, http.StatusRequestEntityTooLarge, apiError{Error: "image exceeds upload limit"})
+		writeError(w, http.StatusRequestEntityTooLarge, "image_too_large", msgImageTooLarge)
 		return
 	}
 	if len(data) == 0 {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "empty image"})
+		writeError(w, http.StatusBadRequest, "empty_image", msgEmptyImage)
 		return
 	}
 	mime, ext, ok := sniffImage(data)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "image must be png, jpeg, or webp"})
+		writeError(w, http.StatusBadRequest, "bad_image_type", msgBadImageType)
 		return
 	}
 
@@ -79,32 +75,28 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	hash := hex.EncodeToString(sum[:])
 	res, err := s.extract.Extract(r.Context(), data, mime)
 	if err != nil {
-		slog.Error("extract", "err", err)
-		writeJSON(w, http.StatusBadGateway, apiError{Error: "vision extractor failed: " + err.Error()})
+		writeExtractFailure(w, err)
 		return
 	}
 	if !res.IsBill {
-		reason := res.Notes
-		if reason == "" {
-			reason = "not a bill"
-		}
+		reason := notBillReason(res.Notes)
 		slog.Info("upload discarded", "reason", reason)
 		writeJSON(w, http.StatusOK, uploadResponse{
 			IsBill:      false,
 			Duplicate:   false,
 			Stored:      false,
 			Reason:      reason,
-			Notes:       res.Notes,
+			Notes:       redactSecrets(strings.TrimSpace(res.Notes)),
 			ContentHash: hash,
 		})
 		return
 	}
 	if res.PaidAt.IsZero() {
-		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: "extractor returned a bill without paid_at"})
+		writeError(w, http.StatusUnprocessableEntity, "missing_paid_at", msgMissingPaidAt)
 		return
 	}
 	if res.AmountCents < 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: "extractor returned a negative amount"})
+		writeError(w, http.StatusUnprocessableEntity, "negative_amount", msgNegativeAmount)
 		return
 	}
 	in := store.NewBill{
@@ -121,7 +113,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if existing, found, err := s.store.FindDuplicate(r.Context(), in); err != nil {
 		slog.Error("lookup", "err", err)
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not read bills"})
+		writeError(w, http.StatusInternalServerError, "store_read_failed", msgStoreRead)
 		return
 	} else if found {
 		writeJSON(w, http.StatusOK, uploadResponse{IsBill: true, Duplicate: true, Stored: false, Bill: &existing})
@@ -131,7 +123,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	path, err := saveImage(s.uploadDir, hash, ext, data)
 	if err != nil {
 		slog.Error("save image", "err", err)
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not save image"})
+		writeError(w, http.StatusInternalServerError, "image_save_failed", msgImageSave)
 		return
 	}
 	in.ImagePath = path
@@ -141,7 +133,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			_ = os.Remove(path)
 		}
 		slog.Error("insert", "err", err)
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not store bill"})
+		writeError(w, http.StatusInternalServerError, "store_write_failed", msgStoreWrite)
 		return
 	}
 	if dup {
@@ -158,13 +150,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	f, from, to, cat, err := s.filter(r, true)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		writeQueryError(w, err)
 		return
 	}
 	bills, err := s.store.List(r.Context(), f)
 	if err != nil {
 		slog.Error("list", "err", err)
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not list bills"})
+		writeError(w, http.StatusInternalServerError, "list_failed", msgListFailed)
 		return
 	}
 	writeJSON(w, http.StatusOK, model.BillList{
@@ -179,13 +171,13 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	f, from, to, cat, err := s.filter(r, false)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		writeQueryError(w, err)
 		return
 	}
 	sum, err := s.store.Summarize(r.Context(), f)
 	if err != nil {
 		slog.Error("summary", "err", err)
-		writeJSON(w, http.StatusInternalServerError, apiError{Error: "could not summarize bills"})
+		writeError(w, http.StatusInternalServerError, "summary_failed", msgSummaryFailed)
 		return
 	}
 	sum.From = from

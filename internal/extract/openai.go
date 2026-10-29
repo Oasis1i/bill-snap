@@ -42,11 +42,8 @@ type openAICompat struct {
 }
 
 func (o *openAICompat) Extract(ctx context.Context, imageBytes []byte, mime string) (Result, error) {
-	if strings.TrimSpace(o.apiKey) == "" {
-		return Result{}, fmt.Errorf("%s: VISION_API_KEY is empty; fill API details before use", o.name)
-	}
-	if strings.TrimSpace(o.model) == "" {
-		return Result{}, fmt.Errorf("%s: VISION_MODEL is empty; fill API details before use", o.name)
+	if strings.TrimSpace(o.apiKey) == "" || strings.TrimSpace(o.model) == "" {
+		return Result{}, failure(FailureNotConfigured, o.name, "vision API key or model is empty", "", nil)
 	}
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -65,12 +62,12 @@ func (o *openAICompat) Extract(ctx context.Context, imageBytes []byte, mime stri
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return Result{}, err
+		return Result{}, failure(FailureProvider, o.name, "build request", "", err)
 	}
 	endpoint := strings.TrimRight(o.baseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return Result{}, err
+		return Result{}, failure(FailureProvider, o.name, "build request", "", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+o.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -78,32 +75,39 @@ func (o *openAICompat) Extract(ctx context.Context, imageBytes []byte, mime stri
 
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("%s: request failed: %w", o.name, err)
+		return Result{}, transportFailure(o.name, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return Result{}, fmt.Errorf("%s: read response: %w", o.name, err)
+		if isTimeout(err) {
+			return Result{}, transportFailure(o.name, err)
+		}
+		return Result{}, failure(FailureBadResponse, o.name, "read response", "", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Result{}, fmt.Errorf("%s: HTTP %d: %s", o.name, resp.StatusCode, truncate(string(respBody), 300))
+		return Result{}, providerStatus(o.name, o.apiKey, resp.StatusCode, respBody)
 	}
 	var parsed chatResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return Result{}, fmt.Errorf("%s: decode response: %w", o.name, err)
+		return Result{}, failure(FailureBadResponse, o.name, "response was not JSON", "", err)
 	}
 	if parsed.Error != nil && parsed.Error.Message != "" {
-		return Result{}, fmt.Errorf("%s: %s", o.name, parsed.Error.Message)
+		return Result{}, failure(FailureProvider, o.name, "provider: "+parsed.Error.Message, o.apiKey, nil)
 	}
 	if len(parsed.Choices) == 0 {
-		return Result{}, fmt.Errorf("%s: response had no choices", o.name)
+		return Result{}, failure(FailureBadResponse, o.name, "response had no choices", "", nil)
 	}
 	text := contentString(parsed.Choices[0].Message.Content)
 	raw, err := extractJSONObject(text)
 	if err != nil {
-		return Result{}, fmt.Errorf("%s: %w", o.name, err)
+		return Result{}, failure(FailureBadResponse, o.name, err.Error(), "", err)
 	}
-	return resultFromModelJSON(o.name, raw, o.loc)
+	res, err := resultFromModelJSON(o.name, raw, o.loc)
+	if err != nil {
+		return Result{}, failure(FailureBadResponse, o.name, err.Error(), o.apiKey, err)
+	}
+	return res, nil
 }
 
 type chatRequest struct {
@@ -344,12 +348,4 @@ func parseModelTime(s string, loc *time.Location) (time.Time, bool, error) {
 		return time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc), false, nil
 	}
 	return time.Time{}, false, fmt.Errorf("unrecognized paid_at %q", s)
-}
-
-func truncate(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
