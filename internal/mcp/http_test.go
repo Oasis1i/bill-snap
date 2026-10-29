@@ -17,14 +17,14 @@ import (
 
 func TestHTTPAuthAndMethods(t *testing.T) {
 	st, loc := testStore(t)
-	disabled := NewHandler(st, loc, "", "")
+	disabled := NewHandler(st, loc, "", "", "")
 	rec := postMCP(disabled, "", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("disabled %d %s", rec.Code, rec.Body.String())
 	}
 	assertPhrase(t, httpMessage(t, rec.Body.String()))
 
-	h := NewHandler(st, loc, "mcp-secret", "")
+	h := NewHandler(st, loc, "mcp-secret", "", "")
 	rec = postMCP(h, "", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-06-18"}})
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("missing %d %s", rec.Code, rec.Body.String())
@@ -115,7 +115,7 @@ func TestHTTPToolsListSchemaAndCall(t *testing.T) {
 		ContentHash:  strings.Repeat("b", 64),
 		RawModelJSON: `{"model":"secret-model"}`,
 	})
-	h := NewHandler(st, loc, "mcp-secret", "")
+	h := NewHandler(st, loc, "mcp-secret", "", "")
 
 	rec := postMCP(h, "mcp-secret", map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 	if rec.Code != http.StatusOK {
@@ -378,7 +378,7 @@ func assertPhrase(t *testing.T, text string) {
 
 func TestHTTPRejectsBadAccept(t *testing.T) {
 	st, loc := testStore(t)
-	h := NewHandler(st, loc, "mcp-secret", "")
+	h := NewHandler(st, loc, "mcp-secret", "", "")
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
 	req.Header.Set("Authorization", "Bearer mcp-secret")
 	req.Header.Set("Content-Type", "text/plain")

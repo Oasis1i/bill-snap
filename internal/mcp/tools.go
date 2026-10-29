@@ -40,9 +40,9 @@ const (
 	msgImageBad    = "截图无法读取"
 )
 
-func toolDefs() []map[string]any {
+func toolDefs(write bool) []map[string]any {
 	cats := model.Categories()
-	return []map[string]any{
+	tools := []map[string]any{
 		{
 			"name":        "list_bills",
 			"description": "按日期范围列出账单明细，金额单位为元，时间按 Asia/Shanghai",
@@ -114,6 +114,10 @@ func toolDefs() []map[string]any {
 			},
 		},
 	}
+	if write {
+		tools = append(tools, addBillTool())
+	}
+	return tools
 }
 
 func dateProperty(desc string) map[string]any {
@@ -142,7 +146,9 @@ type billItem struct {
 	Amount   string `json:"amount"`
 	Category string `json:"category"`
 	Merchant string `json:"merchant"`
+	Items    string `json:"items"`
 	Note     string `json:"note"`
+	Source   string `json:"source"`
 	// HasImage is true only when image_path is non-empty and the file is a
 	// regular file that still resolves inside the configured upload directory.
 	// A missing file or a path outside that directory is false. The path
@@ -173,7 +179,7 @@ type categoryResult struct {
 	Categories []string `json:"categories"`
 }
 
-func callTool(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, params json.RawMessage) toolResult {
+func callTool(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, access Access, params json.RawMessage) toolResult {
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -198,6 +204,8 @@ func callTool(ctx context.Context, st *store.Store, loc *time.Location, uploadDi
 		return toolJSON(categoryResult{Categories: model.Categories()})
 	case "get_bill_image":
 		return getBillImage(ctx, st, loc, uploadDir, call.Arguments)
+	case "add_bill":
+		return addBill(ctx, st, loc, uploadDir, access, call.Arguments, clock())
 	default:
 		return toolError(msgUnknown)
 	}
@@ -247,7 +255,9 @@ func listBills(ctx context.Context, st *store.Store, loc *time.Location, uploadD
 			Amount:   yuan(b),
 			Category: b.Category,
 			Merchant: visibleText(b.Merchant, b.ImagePath, b.RawModelJSON),
+			Items:    b.Items,
 			Note:     visibleText(b.Note, b.ImagePath, b.RawModelJSON),
+			Source:   b.Source,
 			HasImage: hasBillImage(uploadDir, b.ImagePath),
 		})
 	}

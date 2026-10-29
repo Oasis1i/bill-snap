@@ -31,14 +31,15 @@ const minBillSide = 64
 var catalog = []struct {
 	Merchant string
 	Category string
+	Items    string
 }{
-	{"美团外卖", "外卖"},
-	{"饿了么", "外卖"},
-	{"瑞幸咖啡", "餐饮"},
-	{"星巴克", "餐饮"},
-	{"滴滴出行", "交通"},
-	{"盒马鲜生", "日用"},
-	{"淘宝", "购物"},
+	{"美团外卖", "外卖", "黄焖鸡米饭"},
+	{"饿了么", "外卖", "牛肉面"},
+	{"瑞幸咖啡", "餐饮", "生椰拿铁"},
+	{"星巴克", "餐饮", "拿铁"},
+	{"滴滴出行", "交通", "快车"},
+	{"盒马鲜生", "日用", "牛奶"},
+	{"淘宝", "购物", "纸巾"},
 }
 
 // Mock is an offline extractor. Decision rules, in order:
@@ -104,6 +105,7 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 		Category:    model.NormalizeCategory(item.Category),
 		PaidAt:      paid,
 		OrderNo:     orderNo,
+		Items:       item.Items,
 		Confidence:  0.99,
 	}
 	meta["is_bill"] = true
@@ -113,6 +115,7 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 	meta["merchant"] = res.Merchant
 	meta["category"] = res.Category
 	meta["order_no"] = orderNo
+	meta["items"] = res.Items
 	meta["paid_at"] = paid.Format(time.RFC3339)
 	meta["paid_at_defaulted"] = false
 	meta["confidence"] = res.Confidence

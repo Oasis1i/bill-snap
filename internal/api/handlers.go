@@ -108,6 +108,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		PaidAtDefaulted: res.PaidAtDefaulted,
 		OrderNo:         res.OrderNo,
 		Note:            res.Notes,
+		Items:           res.Items,
 		ContentHash:     hash,
 		RawModelJSON:    string(res.RawJSON),
 	}

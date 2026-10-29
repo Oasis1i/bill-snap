@@ -27,6 +27,8 @@ type Extractor interface {
 // PaidAtDefaulted is true when the model omitted paid_at and PaidAt is the upload time.
 // Category is one of the effective category list (model.Categories).
 // Empty or unknown model output is 其他.
+// Items is the product-name list copied from the screenshot. Empty when none
+// is visible, or when the image is not a bill. It is truncated to 100 runes.
 type Result struct {
 	IsBill          bool
 	Amount          string
@@ -37,6 +39,7 @@ type Result struct {
 	PaidAt          time.Time
 	PaidAtDefaulted bool
 	OrderNo         string
+	Items           string
 	Confidence      float64
 	Notes           string
 	RawJSON         json.RawMessage

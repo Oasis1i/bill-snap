@@ -204,16 +204,23 @@ func categoryIndex(list []string, label string) int {
 	return -1
 }
 
-// NormalizeCategory trims whitespace and returns c when it is an exact member
-// of the effective category list. Empty and unknown values, including close
-// variants, become CategoryOther. The original text is not kept as a free-form label.
-func NormalizeCategory(c string) string {
+// ValidCategory reports whether c is an exact member of the effective list
+// after trimming. Close variants are not accepted. add_bill uses this and
+// does not rewrite unknown labels to 其他.
+func ValidCategory(c string) bool {
 	c = strings.TrimSpace(c)
 	categoryMu.RLock()
 	_, ok := categorySet[c]
 	categoryMu.RUnlock()
-	if ok {
-		return c
+	return ok
+}
+
+// NormalizeCategory trims whitespace and returns c when it is an exact member
+// of the effective category list. Empty and unknown values, including close
+// variants, become CategoryOther. The original text is not kept as a free-form label.
+func NormalizeCategory(c string) string {
+	if ValidCategory(c) {
+		return strings.TrimSpace(c)
 	}
 	return CategoryOther
 }

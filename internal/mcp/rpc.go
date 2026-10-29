@@ -38,7 +38,7 @@ type rpcError struct {
 // notification is true when the client sent no id, so the caller writes nothing.
 // status is the HTTP status. The stdio transport ignores it and still writes
 // protocol errors so a bad line does not kill the process.
-func handleMessage(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, line []byte) (body []byte, status int, notification bool) {
+func handleMessage(ctx context.Context, st *store.Store, loc *time.Location, uploadDir string, access Access, line []byte) (body []byte, status int, notification bool) {
 	if loc == nil {
 		loc = time.UTC
 	}
@@ -70,9 +70,9 @@ func handleMessage(ctx context.Context, st *store.Store, loc *time.Location, upl
 	case "ping":
 		return rpcOK(id, map[string]any{}), http.StatusOK, false
 	case "tools/list":
-		return rpcOK(id, map[string]any{"tools": toolDefs()}), http.StatusOK, false
+		return rpcOK(id, map[string]any{"tools": toolDefs(access.CanWrite())}), http.StatusOK, false
 	case "tools/call":
-		return rpcOK(id, callTool(ctx, st, loc, uploadDir, req.Params)), http.StatusOK, false
+		return rpcOK(id, callTool(ctx, st, loc, uploadDir, access, req.Params)), http.StatusOK, false
 	default:
 		return rpcFail(id, codeMethod, "方法不存在"), http.StatusOK, false
 	}

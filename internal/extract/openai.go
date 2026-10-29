@@ -30,11 +30,14 @@ func visionPrompt() string {
 	return `You extract payment receipts from screenshots for a personal expense tracker.
 Reply with one JSON object and no markdown.
 Schema:
-{"is_bill":true,"amount":"12.34","currency":"CNY","merchant":"","category":"外卖","paid_at":"2026-10-26T12:30:00+08:00","order_no":"","confidence":0.0,"notes":""}
+{"is_bill":true,"amount":"12.34","currency":"CNY","merchant":"","category":"外卖","paid_at":"2026-10-26T12:30:00+08:00","order_no":"","items":"","confidence":0.0,"notes":""}
 Rules:
 - is_bill is false when the image is not a payment receipt (chat, landscape, home screen, blank image). Leave amount empty in that case.
 - When is_bill is false, notes must be exactly one short Simplified Chinese phrase with no period and no comma. Choose one of: 聊天截图, 空白图片, 主屏幕截图, 风景照片, 这张图不是付款账单. Do not write English in notes.
+- When is_bill is false, leave items empty.
 - When is_bill is true, leave notes empty. Do not describe the receipt in English.
+- items 是截图里能看到的商品或服务名称，用简体中文原样抄写，例如 "瑞幸生椰拿铁 ×2"。多个用 "、" 分隔。看不到商品名时留空，不要猜，不要用商家名或类别代替。
+- is_bill 为 false 时 items 留空。
 - amount is major currency units (yuan), not cents. Example: 18.5 yuan is "18.50". The phone shows this string directly and does not divide by 100.
 - paid_at is RFC3339 with a numeric offset when the receipt shows a time. Use YYYY-MM-DD when only a date is visible. Leave paid_at empty when no date or time is visible. Do not invent a time.
 - order_no is the payment's order or transaction number when one is visible (订单号, 交易单号, 商户单号, 订单编号, 交易号, 商户订单号). If several are visible, prefer 交易单号, then 订单号, then 商户单号. Copy the number as printed. Leave order_no empty when none is visible. Do not invent one.
@@ -174,6 +177,29 @@ type visionPayload struct {
 	TradeNoCN       flexString      `json:"交易号"`
 	Confidence      float64         `json:"confidence"`
 	Notes           string          `json:"notes"`
+	Items           optionalText    `json:"items"`
+}
+
+// optionalText accepts a JSON string or null. Other types become empty so a
+// weird items value does not fail the whole receipt.
+type optionalText string
+
+func (o *optionalText) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*o = ""
+		return nil
+	}
+	if data[0] != '"' {
+		*o = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*o = optionalText(s)
+	return nil
 }
 
 // flexCategory accepts a JSON string. Null and non-strings become empty so
@@ -276,6 +302,7 @@ func resultFromModelJSON(provider string, raw json.RawMessage, loc *time.Locatio
 			Currency:   strings.ToUpper(strings.TrimSpace(payload.Currency)),
 			Merchant:   strings.TrimSpace(payload.Merchant),
 			Category:   model.NormalizeCategory(string(payload.Category)),
+			Items:      "",
 			Confidence: payload.Confidence,
 			Notes:      notes,
 			RawJSON:    raw,
@@ -316,6 +343,7 @@ func resultFromModelJSON(provider string, raw json.RawMessage, loc *time.Locatio
 		PaidAt:          paid,
 		PaidAtDefaulted: defaulted,
 		OrderNo:         firstOrderNo(payload),
+		Items:           model.NormalizeItems(string(payload.Items)),
 		Confidence:      payload.Confidence,
 		Notes:           notes,
 		RawJSON:         raw,

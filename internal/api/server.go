@@ -16,6 +16,7 @@ import (
 type Options struct {
 	Token          string
 	MCPToken       string
+	MCPWriteToken  string
 	UploadDir      string
 	Location       *time.Location
 	Store          *store.Store
@@ -26,14 +27,15 @@ type Options struct {
 
 // Server serves health, upload, list, summary, and the remote MCP route.
 type Server struct {
-	token     string
-	mcpToken  string
-	uploadDir string
-	loc       *time.Location
-	store     *store.Store
-	extract   extract.Extractor
-	maxBytes  int64
-	version   string
+	token         string
+	mcpToken      string
+	mcpWriteToken string
+	uploadDir     string
+	loc           *time.Location
+	store         *store.Store
+	extract       extract.Extractor
+	maxBytes      int64
+	version       string
 }
 
 // New builds a Server. A nil location means UTC. A non-positive size limit
@@ -52,25 +54,27 @@ func New(opts Options) *Server {
 		opts.Store.SetLocation(opts.Location)
 	}
 	return &Server{
-		token:     opts.Token,
-		mcpToken:  strings.TrimSpace(opts.MCPToken),
-		uploadDir: opts.UploadDir,
-		loc:       opts.Location,
-		store:     opts.Store,
-		extract:   opts.Extractor,
-		maxBytes:  opts.MaxUploadBytes,
-		version:   opts.Version,
+		token:         opts.Token,
+		mcpToken:      strings.TrimSpace(opts.MCPToken),
+		mcpWriteToken: strings.TrimSpace(opts.MCPWriteToken),
+		uploadDir:     opts.UploadDir,
+		loc:           opts.Location,
+		store:         opts.Store,
+		extract:       opts.Extractor,
+		maxBytes:      opts.MaxUploadBytes,
+		version:       opts.Version,
 	}
 }
 
 // Handler is the public mux. /healthz is open. Bill routes require the upload
-// token. POST /mcp requires MCP_TOKEN and is 404 when that token is unset.
+// token. POST /mcp is 404 when both MCP tokens are unset. MCP_TOKEN is
+// read-only. MCP_WRITE_TOKEN can also call add_bill.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /api/v1/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/bills", s.withAuth(s.handleList))
 	mux.HandleFunc("GET /api/v1/summary", s.withAuth(s.handleSummary))
-	mux.Handle("/mcp", mcp.NewHandler(s.store, s.loc, s.mcpToken, s.uploadDir))
+	mux.Handle("/mcp", mcp.NewHandler(s.store, s.loc, s.mcpToken, s.mcpWriteToken, s.uploadDir))
 	return recoverMiddleware(mux)
 }

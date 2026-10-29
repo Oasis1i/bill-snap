@@ -39,14 +39,20 @@ func run() error {
 	if len(cfg.UploadToken) < 8 || cfg.UploadToken == "change-me" {
 		slog.Warn("UPLOAD_TOKEN looks weak; use a long random value before exposing the server")
 	}
-	if cfg.MCPToken == "" {
+	if cfg.MCPToken == "" && cfg.MCPWriteToken == "" {
 		slog.Info("remote mcp disabled", "reason", "MCP_TOKEN unset")
 	} else {
-		if len(cfg.MCPToken) < 8 || cfg.MCPToken == "change-me" {
+		if cfg.MCPToken != "" && (len(cfg.MCPToken) < 8 || cfg.MCPToken == "change-me") {
 			slog.Warn("MCP_TOKEN looks weak; use a long random value before exposing the server")
 		}
-		if cfg.MCPToken == cfg.UploadToken {
+		if cfg.MCPToken != "" && cfg.MCPToken == cfg.UploadToken {
 			slog.Warn("MCP_TOKEN matches UPLOAD_TOKEN; use a separate value")
+		}
+		if cfg.MCPWriteToken != "" && (len(cfg.MCPWriteToken) < 8 || cfg.MCPWriteToken == "change-me") {
+			slog.Warn("MCP_WRITE_TOKEN looks weak; use a long random value before exposing the server")
+		}
+		if cfg.MCPWriteToken != "" && cfg.MCPWriteToken == cfg.UploadToken {
+			slog.Warn("MCP_WRITE_TOKEN matches UPLOAD_TOKEN; use a separate value")
 		}
 	}
 
@@ -74,6 +80,7 @@ func run() error {
 	srv := api.New(api.Options{
 		Token:          cfg.UploadToken,
 		MCPToken:       cfg.MCPToken,
+		MCPWriteToken:  cfg.MCPWriteToken,
 		UploadDir:      cfg.UploadDir,
 		Location:       cfg.Location,
 		Store:          st,
@@ -94,7 +101,7 @@ func run() error {
 	defer stop()
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", cfg.HTTPAddr, "provider", cfg.VisionProvider, "db", cfg.DBPath, "categories", strings.Join(cfg.Categories, ","), "mcp", cfg.MCPToken != "")
+		slog.Info("listening", "addr", cfg.HTTPAddr, "provider", cfg.VisionProvider, "db", cfg.DBPath, "categories", strings.Join(cfg.Categories, ","), "mcp", cfg.MCPToken != "" || cfg.MCPWriteToken != "", "mcp_write", cfg.MCPWriteToken != "")
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
