@@ -1,8 +1,9 @@
-// Package mcp serves read-only bill tools over stdio and Streamable HTTP.
+// Package mcp serves bill tools over stdio and Streamable HTTP.
 // Both transports read the same SQLite database as the HTTP API. The stdio
-// process does not check a token: anyone who can spawn it can already read
-// the file. POST /mcp is a separate bearer (MCP_TOKEN) and stays closed
-// when that variable is unset.
+// process does not check a token and stays read-only: anyone who can spawn
+// it can already read the file. add_bill is only offered on POST /mcp to the
+// MCP_WRITE_TOKEN bearer. The route stays closed when both MCP_TOKEN and
+// MCP_WRITE_TOKEN are unset.
 package mcp
 
 import (
@@ -28,7 +29,7 @@ func Serve(r io.Reader, w io.Writer, st *store.Store, loc *time.Location, upload
 		if len(line) == 0 {
 			continue
 		}
-		body, _, notification := handleMessage(context.Background(), st, loc, uploadDir, line)
+		body, _, notification := handleMessage(context.Background(), st, loc, uploadDir, Access{Kind: tokenKindStdio}, line)
 		if notification {
 			continue
 		}

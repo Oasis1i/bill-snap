@@ -15,16 +15,20 @@ import (
 const maxBody = 1 << 20
 
 // NewHandler is the Streamable HTTP MCP endpoint mounted at /mcp.
-// An empty token disables it: every method answers 404 and no tool runs.
-// The handler is stateless. It does not issue Mcp-Session-Id. A client that
-// sends one is still served, because this process never opened a session.
-// GET is 405. Responses are a single JSON object unless the client accepts
-// only text/event-stream, in which case the same object is one SSE event.
-// uploadDir is the only directory get_bill_image will read.
-func NewHandler(st *store.Store, loc *time.Location, token, uploadDir string) http.Handler {
-	token = strings.TrimSpace(token)
+// The route is disabled when both tokens are empty: every method answers 404
+// and no tool runs. readToken is the read-only bearer (MCP_TOKEN).
+// writeToken is MCP_WRITE_TOKEN. It can call the read tools and add_bill.
+// Comparison is constant-time. The handler is stateless. It does not issue
+// Mcp-Session-Id. A client that sends one is still served, because this
+// process never opened a session. GET is 405. Responses are a single JSON
+// object unless the client accepts only text/event-stream, in which case
+// the same object is one SSE event. uploadDir is the only directory
+// get_bill_image will read.
+func NewHandler(st *store.Store, loc *time.Location, readToken, writeToken, uploadDir string) http.Handler {
+	readToken = strings.TrimSpace(readToken)
+	writeToken = strings.TrimSpace(writeToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveHTTP(w, r, st, loc, token, uploadDir)
+		serveHTTP(w, r, st, loc, readToken, writeToken, uploadDir)
 	})
 }
 
@@ -33,8 +37,8 @@ type httpErrorBody struct {
 	Message string `json:"message"`
 }
 
-func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *time.Location, token, uploadDir string) {
-	if token == "" {
+func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *time.Location, readToken, writeToken, uploadDir string) {
+	if readToken == "" && writeToken == "" {
 		writeHTTPError(w, http.StatusNotFound, "not_found", "接口未启用")
 		return
 	}
@@ -43,7 +47,8 @@ func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *tim
 		writeHTTPError(w, http.StatusMethodNotAllowed, "method_not_allowed", "只支持POST")
 		return
 	}
-	if !authorized(r, token) {
+	kind, ok := authorize(r, readToken, writeToken)
+	if !ok {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="bill-snap-mcp"`)
 		writeHTTPError(w, http.StatusUnauthorized, "unauthorized", "未授权")
 		return
@@ -70,7 +75,10 @@ func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *tim
 		writeRPC(w, http.StatusBadRequest, rpcFail(json.RawMessage("null"), codeBadReq, "请求过大"), false)
 		return
 	}
-	payload, status, notification := handleMessage(r.Context(), st, loc, uploadDir, bytes.TrimSpace(body))
+	payload, status, notification := handleMessage(r.Context(), st, loc, uploadDir, Access{
+		Kind:            kind,
+		WriteConfigured: writeToken != "",
+	}, bytes.TrimSpace(body))
 	if notification {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -78,12 +86,30 @@ func serveHTTP(w http.ResponseWriter, r *http.Request, st *store.Store, loc *tim
 	writeRPC(w, status, payload, sseOnly)
 }
 
-func authorized(r *http.Request, token string) bool {
+// authorize compares the bearer with both configured tokens. Both comparisons
+// run when both tokens are set, so a match on the first does not skip the
+// second. The token value is not returned.
+func authorize(r *http.Request, readToken, writeToken string) (string, bool) {
 	got := bearer(r.Header.Get("Authorization"))
-	if got == "" || token == "" {
+	if got == "" {
+		return "", false
+	}
+	readOK := tokenMatch(got, readToken)
+	writeOK := tokenMatch(got, writeToken)
+	if writeOK {
+		return tokenKindWrite, true
+	}
+	if readOK {
+		return tokenKindRead, true
+	}
+	return "", false
+}
+
+func tokenMatch(got, want string) bool {
+	if got == "" || want == "" || len(got) != len(want) {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func bearer(header string) string {

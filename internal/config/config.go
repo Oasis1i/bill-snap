@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,13 +14,16 @@ import (
 )
 
 // Config is process configuration. The HTTP server requires UploadToken.
-// MCPToken gates POST /mcp. Empty disables that route. The stdio MCP process
-// does not read it. Both processes need the database path, time zone, and
-// category list.
+// MCPToken gates POST /mcp. MCPWriteToken is a second bearer that may also
+// call add_bill. The route stays closed when both are empty. The process
+// refuses to start when the two MCP tokens are equal. The stdio MCP process
+// does not use either token. Both processes need the database path, time
+// zone, and category list.
 type Config struct {
 	HTTPAddr       string
 	UploadToken    string
 	MCPToken       string
+	MCPWriteToken  string
 	DBPath         string
 	UploadDir      string
 	Timezone       string
@@ -58,10 +62,16 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpToken := strings.TrimSpace(os.Getenv("MCP_TOKEN"))
+	writeToken := strings.TrimSpace(os.Getenv("MCP_WRITE_TOKEN"))
+	if writeToken != "" && tokenEqual(writeToken, mcpToken) {
+		return Config{}, fmt.Errorf("MCP_WRITE_TOKEN must differ from MCP_TOKEN")
+	}
 	return Config{
 		HTTPAddr:       httpAddr(),
 		UploadToken:    strings.TrimSpace(os.Getenv("UPLOAD_TOKEN")),
-		MCPToken:       strings.TrimSpace(os.Getenv("MCP_TOKEN")),
+		MCPToken:       mcpToken,
+		MCPWriteToken:  writeToken,
 		DBPath:         getenv("DB_PATH", "data/bills.db"),
 		UploadDir:      getenv("UPLOAD_DIR", "data/uploads"),
 		Timezone:       tz,
@@ -91,6 +101,15 @@ func httpAddr() string {
 		return ":" + port
 	}
 	return "127.0.0.1:8080"
+}
+
+// tokenEqual compares two secrets without short-circuiting on the first
+// differing byte. Different lengths are not equal.
+func tokenEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func getenv(key, fallback string) string {

@@ -9,6 +9,10 @@ package model
 // screenshot did not show one. PaidAtDefaulted is true when PaidAt was filled
 // with the upload time because the model omitted it.
 // Category is one of the effective category list. Empty or unknown extractor output is 其他.
+// Items is the product-name list copied from a screenshot or typed for a manual
+// bill. Empty means none was visible. Source is "screenshot" or "manual".
+// RequestID is the manual idempotency key, empty for screenshots and for
+// manual rows that did not send one.
 type Bill struct {
 	ID              int64  `json:"id"`
 	AmountCents     int64  `json:"amount_cents"`
@@ -20,6 +24,9 @@ type Bill struct {
 	PaidAtDefaulted bool   `json:"paid_at_defaulted"`
 	OrderNo         string `json:"order_no"`
 	Note            string `json:"note"`
+	Items           string `json:"items"`
+	Source          string `json:"source"`
+	RequestID       string `json:"request_id,omitempty"`
 	ImagePath       string `json:"image_path"`
 	ContentHash     string `json:"content_hash"`
 	DedupKey        string `json:"dedup_key"`

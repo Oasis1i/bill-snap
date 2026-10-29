@@ -549,6 +549,30 @@ func TestUploadFailureMessages(t *testing.T) {
 		}
 	})
 
+	t.Run("items stay on the bill and the note stays chinese", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{
+			IsBill: true, AmountCents: 2590, Currency: "CNY", Merchant: "瑞幸咖啡",
+			Category: "餐饮", PaidAt: time.Date(2026, 10, 26, 4, 0, 0, 0, time.UTC),
+			Items: "瑞幸生椰拿铁 ×2",
+			Notes: "paid_at missing; defaulted to upload time",
+		}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Bill == nil || body.Bill.Amount != "25.90" || body.Bill.Category != "餐饮" || body.Bill.Items != "瑞幸生椰拿铁 ×2" || body.Bill.Source != "screenshot" {
+			t.Fatalf("%+v", body.Bill)
+		}
+		if body.Bill.Note != "未识别到支付时间" || asciiLetters.MatchString(body.Bill.Note) || strings.Contains(rec.Body.String(), "paid_at missing") {
+			t.Fatalf("note leaked english: %s", rec.Body.String())
+		}
+	})
+
 	t.Run("small image reason", func(t *testing.T) {
 		small, err := testimg.NoisyPNG(32, 32, 1)
 		if err != nil {

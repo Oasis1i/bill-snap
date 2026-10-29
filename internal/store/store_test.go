@@ -505,6 +505,16 @@ CREATE UNIQUE INDEX idx_bills_content_hash ON bills(content_hash);
 	if !shaxian.PaidAtDefaulted || shaxian.OrderNo != "" || shaxian.AmountCents != 1070 {
 		t.Fatalf("backfill: %+v", shaxian)
 	}
+	if shaxian.Items != "" || shaxian.Source != "screenshot" || shaxian.RequestID != "" {
+		t.Fatalf("legacy items/source: %+v", shaxian)
+	}
+	var requestIndex, auditName string
+	if err := st.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_bills_request_id'`).Scan(&requestIndex); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit_log'`).Scan(&auditName); err != nil {
+		t.Fatal(err)
+	}
 	luckin, ok, err := st.FindByContentHash(ctx, strings.Repeat("b", 64))
 	if err != nil || !ok || luckin.PaidAtDefaulted {
 		t.Fatalf("note without the defaulted sentence: %+v ok=%v err=%v", luckin, ok, err)
@@ -532,6 +542,9 @@ CREATE UNIQUE INDEX idx_bills_content_hash ON bills(content_hash);
 	reopened, ok, err := st.FindByContentHash(ctx, strings.Repeat("a", 64))
 	if err != nil || !ok || !reopened.PaidAtDefaulted {
 		t.Fatalf("reopen: %+v ok=%v err=%v", reopened, ok, err)
+	}
+	if reopened.Items != "" || reopened.Source != "screenshot" || reopened.AmountCents != 1070 {
+		t.Fatalf("reopen items: %+v", reopened)
 	}
 }
 

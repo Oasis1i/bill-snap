@@ -40,6 +40,9 @@ func TestMockRules(t *testing.T) {
 	if a.PaidAtDefaulted || len(a.OrderNo) != 13 || !strings.HasPrefix(a.OrderNo, "M") {
 		t.Fatalf("order %q defaulted %v", a.OrderNo, a.PaidAtDefaulted)
 	}
+	if a.Items == "" || a.Items == a.Merchant || utf8.RuneCountInString(a.Items) > model.MaxItemRunes {
+		t.Fatalf("items %q merchant %q", a.Items, a.Merchant)
+	}
 	b, err := m.Extract(ctx, noisy, "image/png")
 	if err != nil {
 		t.Fatal(err)
@@ -298,6 +301,9 @@ func TestVisionPromptCategoryEnum(t *testing.T) {
 	if !strings.Contains(p, "use "+model.CategoryOther) {
 		t.Fatal("prompt should tell the model to use 其他 when unsure")
 	}
+	if !strings.Contains(p, `"items":""`) || !strings.Contains(p, "不要猜") || !strings.Contains(p, "瑞幸生椰拿铁 ×2") || !strings.Contains(p, "is_bill 为 false 时 items 留空") {
+		t.Fatal("prompt missing items rules")
+	}
 	if strings.Contains(p, "such as") {
 		t.Fatal("prompt still invites a free-form category")
 	}
@@ -356,6 +362,42 @@ func TestNormalizeExtractedCategory(t *testing.T) {
 		if res.IsBill != tc.bill || res.Category != tc.want {
 			t.Fatalf("%s: is_bill %v category %q", tc.raw, res.IsBill, res.Category)
 		}
+	}
+}
+
+func TestItemsParsingAndTruncation(t *testing.T) {
+	loc := time.UTC
+	long := strings.Repeat("瑞", 99) + "🙂多出来"
+	raw := `{"is_bill":true,"amount":"1.00","paid_at":"2026-10-26","items":"  ` + long + `  "}`
+	res, err := resultFromModelJSON("test", json.RawMessage(raw), loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if utf8.RuneCountInString(res.Items) != model.MaxItemRunes {
+		t.Fatalf("runes %d %q", utf8.RuneCountInString(res.Items), res.Items)
+	}
+	if !strings.HasPrefix(res.Items, strings.Repeat("瑞", 99)) || !strings.HasSuffix(res.Items, "🙂") {
+		t.Fatalf("truncated %q", res.Items)
+	}
+	if strings.Contains(res.Items, "多") {
+		t.Fatalf("kept overflow %q", res.Items)
+	}
+
+	res, err = resultFromModelJSON("test", json.RawMessage(`{"is_bill":true,"amount":"1.00","paid_at":"2026-10-26","items":"  瑞幸   生椰拿铁 ×2  "}`), loc)
+	if err != nil || res.Items != "瑞幸 生椰拿铁 ×2" {
+		t.Fatalf("%q %v", res.Items, err)
+	}
+	res, err = resultFromModelJSON("test", json.RawMessage(`{"is_bill":true,"amount":"1.00","paid_at":"2026-10-26","items":null}`), loc)
+	if err != nil || res.Items != "" {
+		t.Fatalf("%q %v", res.Items, err)
+	}
+	res, err = resultFromModelJSON("test", json.RawMessage(`{"is_bill":true,"amount":"1.00","paid_at":"2026-10-26","items":123}`), loc)
+	if err != nil || res.Items != "" {
+		t.Fatalf("non-string items %q %v", res.Items, err)
+	}
+	res, err = resultFromModelJSON("test", json.RawMessage(`{"is_bill":false,"items":"瑞幸生椰拿铁","notes":"聊天截图"}`), loc)
+	if err != nil || res.IsBill || res.Items != "" {
+		t.Fatalf("%+v %v", res, err)
 	}
 }
 

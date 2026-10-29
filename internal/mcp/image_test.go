@@ -258,7 +258,7 @@ func TestBillImageTool(t *testing.T) {
 		ContentHash: "hash-bad",
 	})
 
-	h := NewHandler(st, loc, "mcp-secret", upload)
+	h := NewHandler(st, loc, "mcp-secret", "", upload)
 
 	rec := postMCP(h, "", map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",

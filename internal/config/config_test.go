@@ -113,6 +113,29 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
+func TestLoadRejectsEqualMCPTokens(t *testing.T) {
+	t.Setenv("APP_TZ", "UTC")
+	t.Setenv("MCP_TOKEN", "same-secret-value")
+	t.Setenv("MCP_WRITE_TOKEN", "same-secret-value")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MCP_WRITE_TOKEN") {
+		t.Fatalf("got %v", err)
+	}
+	t.Setenv("MCP_WRITE_TOKEN", "other-secret-value")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPToken != "same-secret-value" || cfg.MCPWriteToken != "other-secret-value" {
+		t.Fatalf("%+v", cfg)
+	}
+	if !tokenEqual(cfg.MCPToken, "same-secret-value") || tokenEqual(cfg.MCPToken, cfg.MCPWriteToken) {
+		t.Fatal("constant-time compare")
+	}
+	if tokenEqual("short", "longer") {
+		t.Fatal("different lengths")
+	}
+}
+
 func TestLoadRejectsBadLimit(t *testing.T) {
 	t.Setenv("APP_TZ", "UTC")
 	t.Setenv("MAX_UPLOAD_BYTES", "nope")
