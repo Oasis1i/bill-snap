@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/jpeg"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Oasis1i/bill-snap/internal/model"
 	"github.com/Oasis1i/bill-snap/internal/testimg"
@@ -180,8 +182,13 @@ func TestOpenAICompatibleParse(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"bad key"}}`))
 	})
-	if _, err := ex.Extract(context.Background(), []byte{1}, "image/png"); err == nil {
-		t.Fatal("expected upstream error")
+	_, err = ex.Extract(context.Background(), []byte{1}, "image/png")
+	var denied *Failure
+	if !errors.As(err, &denied) || denied.Kind != FailureProvider {
+		t.Fatalf("expected provider failure, got %v", err)
+	}
+	if strings.Contains(err.Error(), "bad key") {
+		t.Fatalf("error string leaked provider payload: %v", err)
 	}
 }
 
@@ -327,4 +334,116 @@ func writeChoice(w http.ResponseWriter, content any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"choices": []any{map[string]any{"message": map[string]any{"content": content}}},
 	})
+}
+
+func TestVisionFailureClass(t *testing.T) {
+	const secret = "sk-SUPERSECRET987654"
+
+	t.Run("not configured", func(t *testing.T) {
+		o := &openAICompat{name: "qwen", apiKey: "", model: "", client: http.DefaultClient}
+		_, err := o.Extract(context.Background(), []byte{1}, "image/png")
+		assertFailure(t, err, FailureNotConfigured, secret)
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(250 * time.Millisecond)
+		}))
+		defer srv.Close()
+		ex, err := New(Options{
+			Provider:   "qwen",
+			APIKey:     secret,
+			BaseURL:    srv.URL,
+			Model:      "qwen-vl-test",
+			HTTPClient: &http.Client{Timeout: 40 * time.Millisecond},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = ex.Extract(context.Background(), []byte{1}, "image/png")
+		assertFailure(t, err, FailureTimeout, secret)
+	})
+
+	t.Run("bad response", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"not json at all"}}]}`))
+		}))
+		defer srv.Close()
+		ex := visionClient(t, srv, secret)
+		_, err := ex.Extract(context.Background(), []byte{1}, "image/png")
+		assertFailure(t, err, FailureBadResponse, secret)
+		var f *Failure
+		if !errors.As(err, &f) || strings.Contains(f.Detail, "not json at all") {
+			t.Fatalf("detail leaked model text: %+v", f)
+		}
+	})
+
+	t.Run("provider payload redacted", func(t *testing.T) {
+		huge := `{"error":{"message":"invalid ` + secret + ` bearer ` + secret + `"}}` + strings.Repeat("Y", 4000)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, huge)
+		}))
+		defer srv.Close()
+		ex := visionClient(t, srv, secret)
+		_, err := ex.Extract(context.Background(), []byte{1}, "image/png")
+		f := assertFailure(t, err, FailureProvider, secret)
+		if !strings.Contains(f.Detail, "HTTP 502") {
+			t.Fatalf("detail %q", f.Detail)
+		}
+		if !strings.Contains(f.Detail, "[redacted]") {
+			t.Fatalf("detail did not redact: %q", f.Detail)
+		}
+		if utf8.RuneCountInString(f.Detail) > logDetailRunes+3 {
+			t.Fatalf("detail too long (%d): %q", utf8.RuneCountInString(f.Detail), f.Detail)
+		}
+		if strings.Contains(f.Detail, strings.Repeat("Y", 50)) {
+			t.Fatal("detail kept a long provider payload")
+		}
+	})
+
+	t.Run("provider error message", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"error":{"message":"quota exceeded `+secret+`"}}`)
+		}))
+		defer srv.Close()
+		ex := visionClient(t, srv, secret)
+		_, err := ex.Extract(context.Background(), []byte{1}, "image/png")
+		f := assertFailure(t, err, FailureProvider, secret)
+		if strings.Contains(f.Detail, secret) || strings.Contains(err.Error(), secret) {
+			t.Fatalf("leaked key in %+v / %v", f, err)
+		}
+	})
+}
+
+func visionClient(t *testing.T, srv *httptest.Server, secret string) Extractor {
+	t.Helper()
+	ex, err := New(Options{
+		Provider:   "glm",
+		APIKey:     secret,
+		BaseURL:    srv.URL,
+		Model:      "glm-test",
+		HTTPClient: srv.Client(),
+		Location:   time.UTC,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ex
+}
+
+func assertFailure(t *testing.T, err error, kind FailureKind, secret string) *Failure {
+	t.Helper()
+	var f *Failure
+	if !errors.As(err, &f) || f.Kind != kind {
+		t.Fatalf("kind %s, got %v", kind, err)
+	}
+	blob := err.Error() + " " + f.Detail
+	if secret != "" && strings.Contains(blob, secret) {
+		t.Fatalf("secret leaked: %s", blob)
+	}
+	if strings.Contains(err.Error(), "HTTP ") || strings.Contains(err.Error(), "{") {
+		t.Fatalf("error string has payload: %v", err)
+	}
+	return f
 }

@@ -3,19 +3,25 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Oasis1i/bill-snap/internal/extract"
 	"github.com/Oasis1i/bill-snap/internal/store"
 	"github.com/Oasis1i/bill-snap/internal/testimg"
+	_ "modernc.org/sqlite"
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -134,8 +140,11 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	if err := json.Unmarshal(blankRec.Body.Bytes(), &discarded); err != nil {
 		t.Fatal(err)
 	}
-	if discarded.IsBill || discarded.Stored || discarded.Reason == "" {
+	if discarded.IsBill || discarded.Stored || discarded.Reason != "图片几乎是纯色" {
 		t.Fatalf("%+v", discarded)
+	}
+	if !strings.Contains(discarded.Notes, "solid") {
+		t.Fatalf("notes should keep the extractor text: %+v", discarded)
 	}
 
 	entries, err := os.ReadDir(upload)
@@ -310,4 +319,347 @@ func TestUploadOrderAndDefaultedDedup(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("upload dir has %d files, want 2 (duplicates must not keep a second image)", len(entries))
 	}
+}
+
+func TestUploadFailureMessages(t *testing.T) {
+	noisy, err := testimg.NoisyPNG(96, 80, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "sk-LIVEKEY1234567890"
+
+	t.Run("unauthorized", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "", ""))
+		assertAPIError(t, rec, http.StatusUnauthorized, "unauthorized", "未授权")
+	})
+
+	t.Run("too large", func(t *testing.T) {
+		srv := serverWith(t, extract.NewMock(), 32)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		assertAPIError(t, rec, http.StatusRequestEntityTooLarge, "image_too_large", "图片超过上传大小限制")
+	})
+
+	t.Run("bad type", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "note.txt", []byte("hello"), "test-token", ""))
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_image_type", "只支持 png、jpeg 或 webp")
+	})
+
+	t.Run("empty image", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", nil, "test-token", ""))
+		assertAPIError(t, rec, http.StatusBadRequest, "empty_image", "图片是空的")
+	})
+
+	t.Run("missing image", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		if err := w.WriteField("note", "x"); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/upload", &buf)
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assertAPIError(t, rec, http.StatusBadRequest, "missing_image", "缺少图片")
+	})
+
+	t.Run("invalid form", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/upload", strings.NewReader("nope"))
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=none")
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		assertAPIError(t, rec, http.StatusBadRequest, "invalid_form", "上传格式不对")
+	})
+
+	extractCases := []struct {
+		name    string
+		err     error
+		code    string
+		message string
+	}{
+		{"timeout", &extract.Failure{Kind: extract.FailureTimeout, Detail: "context deadline exceeded"}, "extract_timeout", "识别超时"},
+		{"deadline", context.DeadlineExceeded, "extract_timeout", "识别超时"},
+		{"bad response", &extract.Failure{Kind: extract.FailureBadResponse, Detail: "model response JSON is invalid"}, "extract_bad_response", "识别结果无法解析"},
+		{"provider", &extract.Failure{Kind: extract.FailureProvider, Provider: "qwen", Detail: "HTTP 502: " + secret + " " + strings.Repeat("Z", 3000)}, "extract_provider_error", "识别服务出错"},
+		{"not configured", &extract.Failure{Kind: extract.FailureNotConfigured, Detail: "vision API key or model is empty"}, "extract_not_configured", "识别服务未配置"},
+		{"other", fmt.Errorf("exploded: %s %s", secret, strings.Repeat("Q", 3000)), "extract_failed", "识别失败"},
+	}
+	for _, tc := range extractCases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLog(t)
+			srv := serverWith(t, errExtractor{err: tc.err}, 1<<20)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+			assertAPIError(t, rec, http.StatusBadGateway, tc.code, tc.message)
+			body := rec.Body.String()
+			if strings.Contains(body, secret) || strings.Contains(body, strings.Repeat("Z", 40)) || strings.Contains(body, strings.Repeat("Q", 40)) {
+				t.Fatalf("response leaked provider detail: %s", body)
+			}
+			line := logs.String()
+			if strings.Contains(line, secret) {
+				t.Fatalf("log leaked secret: %s", line)
+			}
+			if strings.Contains(line, strings.Repeat("Z", 250)) || strings.Contains(line, strings.Repeat("Q", 250)) {
+				t.Fatalf("log kept a long payload: %s", line)
+			}
+		})
+	}
+
+	t.Run("missing paid_at", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{
+			IsBill: true, AmountCents: 100, Currency: "CNY", Merchant: "店",
+		}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		assertAPIError(t, rec, http.StatusUnprocessableEntity, "missing_paid_at", "没识别出支付时间")
+	})
+
+	t.Run("negative amount", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{
+			IsBill: true, AmountCents: -50, Currency: "CNY", Merchant: "店", PaidAt: time.Now(),
+		}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		assertAPIError(t, rec, http.StatusUnprocessableEntity, "negative_amount", "金额不能为负数")
+	})
+
+	t.Run("empty notes", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{IsBill: false}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		if rec.Code != http.StatusOK {
+			t.Fatal(rec.Body.String())
+		}
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.IsBill || body.Reason != "这张图不是付款账单" || body.Notes != "" {
+			t.Fatalf("%+v", body)
+		}
+	})
+
+	t.Run("notes cut at comma", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{IsBill: false, Notes: "聊天记录，不是付款账单。"}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Reason != "聊天记录" || strings.Contains(body.Reason, "。") || strings.Contains(body.Reason, "，") {
+			t.Fatalf("%+v", body)
+		}
+	})
+
+	t.Run("model notes stay short", func(t *testing.T) {
+		notes := "聊天截图 " + secret + " " + strings.Repeat("哈", 100)
+		srv := serverWith(t, fixedExtractor{res: extract.Result{IsBill: false, Notes: notes}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(body.Reason, secret) {
+			t.Fatalf("reason leaked key: %s", body.Reason)
+		}
+		if utf8.RuneCountInString(body.Reason) > reasonRunes+1 {
+			t.Fatalf("reason too long: %s", body.Reason)
+		}
+		if !strings.Contains(body.Reason, "聊天截图") || !strings.Contains(body.Reason, "[redacted]") {
+			t.Fatalf("%+v", body)
+		}
+		if strings.Contains(body.Notes, secret) || !strings.Contains(body.Notes, "[redacted]") || !strings.Contains(body.Notes, "聊天截图") {
+			t.Fatalf("notes should keep the extractor text without the key: %+v", body)
+		}
+	})
+
+	t.Run("small image reason", func(t *testing.T) {
+		small, err := testimg.NoisyPNG(32, 32, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv, _ := newTestServer(t)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", small, "test-token", ""))
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Reason != "图片太小" {
+			t.Fatalf("%+v", body)
+		}
+	})
+
+	t.Run("store read", func(t *testing.T) {
+		dir := t.TempDir()
+		st, err := store.Open(filepath.Join(dir, "bills.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := New(Options{
+			Token: "test-token", UploadDir: filepath.Join(dir, "uploads"),
+			Store: st, Extractor: extract.NewMock(), MaxUploadBytes: 1 << 20,
+		})
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_read_failed", "读取账单失败")
+		if strings.Contains(rec.Body.String(), "bills.db") || strings.Contains(rec.Body.String(), "sqlite") {
+			t.Fatalf("response leaked store error: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("image save", func(t *testing.T) {
+		dir := t.TempDir()
+		blocked := filepath.Join(dir, "not-a-dir")
+		if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(filepath.Join(dir, "bills.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		srv := New(Options{
+			Token: "test-token", UploadDir: blocked,
+			Store: st, Extractor: extract.NewMock(), MaxUploadBytes: 1 << 20,
+		})
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		assertAPIError(t, rec, http.StatusInternalServerError, "image_save_failed", "保存图片失败")
+		if strings.Contains(rec.Body.String(), "not-a-dir") {
+			t.Fatalf("response leaked path: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("store write", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "bills.db")
+		st, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if _, err := db.Exec(`CREATE TRIGGER fail_insert BEFORE INSERT ON bills BEGIN SELECT RAISE(FAIL, 'blocked'); END;`); err != nil {
+			t.Fatal(err)
+		}
+		srv := New(Options{
+			Token: "test-token", UploadDir: filepath.Join(dir, "uploads"),
+			Store: st, Extractor: extract.NewMock(), MaxUploadBytes: 1 << 20,
+		})
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_write_failed", "保存账单失败")
+		if strings.Contains(rec.Body.String(), "blocked") {
+			t.Fatalf("response leaked insert error: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("bad limit", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/bills?limit=9999", nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		srv.Handler().ServeHTTP(rec, req)
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_limit", "条数应为 1 到 500 的整数")
+	})
+}
+
+type errExtractor struct{ err error }
+
+func (e errExtractor) Extract(context.Context, []byte, string) (extract.Result, error) {
+	return extract.Result{}, e.err
+}
+
+type fixedExtractor struct{ res extract.Result }
+
+func (e fixedExtractor) Extract(context.Context, []byte, string) (extract.Result, error) {
+	return e.res, nil
+}
+
+func serverWith(t *testing.T, ex extract.Extractor, max int64) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "bills.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return New(Options{
+		Token:          "test-token",
+		UploadDir:      filepath.Join(dir, "uploads"),
+		Store:          st,
+		Extractor:      ex,
+		MaxUploadBytes: max,
+	})
+}
+
+func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, code, message string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("status %d, want %d: %s", rec.Code, status, rec.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("want error and message only: %s", rec.Body.String())
+	}
+	var got apiError
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error != code || got.Message != message {
+		t.Fatalf("got %+v want %s %s", got, code, message)
+	}
+	if strings.ContainsAny(got.Message, "\n\r") || strings.Contains(got.Message, "，") || strings.Contains(got.Message, "。") || utf8.RuneCountInString(got.Message) > 40 {
+		t.Fatalf("message not a short phrase: %q", got.Message)
+	}
+	if !containsHan(got.Message) {
+		t.Fatalf("message has no Chinese: %q", got.Message)
+	}
+	if strings.Contains(rec.Body.String(), `\u`) {
+		t.Fatalf("message was escaped: %s", rec.Body.String())
+	}
+}
+
+func containsHan(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }

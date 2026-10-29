@@ -11,7 +11,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="bill-snap"`)
-			writeJSON(w, http.StatusUnauthorized, apiError{Error: "unauthorized"})
+			writeError(w, http.StatusUnauthorized, "unauthorized", msgUnauthorized)
 			return
 		}
 		next(w, r)
@@ -48,7 +48,7 @@ func recoverMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			if v := recover(); v != nil {
 				slog.Error("panic", "err", v, "path", r.URL.Path)
-				writeJSON(w, http.StatusInternalServerError, apiError{Error: "internal error"})
+				writeError(w, http.StatusInternalServerError, "internal_error", msgInternal)
 			}
 		}()
 		next.ServeHTTP(w, r)
