@@ -140,7 +140,7 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	if err := json.Unmarshal(blankRec.Body.Bytes(), &discarded); err != nil {
 		t.Fatal(err)
 	}
-	if discarded.IsBill || discarded.Stored || discarded.Reason != "图片几乎是纯色，未当作账单。" {
+	if discarded.IsBill || discarded.Stored || discarded.Reason != "图片几乎是纯色" {
 		t.Fatalf("%+v", discarded)
 	}
 	if !strings.Contains(discarded.Notes, "solid") {
@@ -332,28 +332,28 @@ func TestUploadFailureMessages(t *testing.T) {
 		srv, _ := newTestServer(t)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "", ""))
-		assertAPIError(t, rec, http.StatusUnauthorized, "unauthorized", "未授权，请检查上传令牌。")
+		assertAPIError(t, rec, http.StatusUnauthorized, "unauthorized", "未授权")
 	})
 
 	t.Run("too large", func(t *testing.T) {
 		srv := serverWith(t, extract.NewMock(), 32)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
-		assertAPIError(t, rec, http.StatusRequestEntityTooLarge, "image_too_large", "图片超过上传大小限制。")
+		assertAPIError(t, rec, http.StatusRequestEntityTooLarge, "image_too_large", "图片超过上传大小限制")
 	})
 
 	t.Run("bad type", func(t *testing.T) {
 		srv, _ := newTestServer(t)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "note.txt", []byte("hello"), "test-token", ""))
-		assertAPIError(t, rec, http.StatusBadRequest, "bad_image_type", "只支持 png、jpeg 或 webp。")
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_image_type", "只支持 png、jpeg 或 webp")
 	})
 
 	t.Run("empty image", func(t *testing.T) {
 		srv, _ := newTestServer(t)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", nil, "test-token", ""))
-		assertAPIError(t, rec, http.StatusBadRequest, "empty_image", "图片是空的。")
+		assertAPIError(t, rec, http.StatusBadRequest, "empty_image", "图片是空的")
 	})
 
 	t.Run("missing image", func(t *testing.T) {
@@ -371,7 +371,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
-		assertAPIError(t, rec, http.StatusBadRequest, "missing_image", "缺少图片，请用表单字段 image 上传。")
+		assertAPIError(t, rec, http.StatusBadRequest, "missing_image", "缺少图片")
 	})
 
 	t.Run("invalid form", func(t *testing.T) {
@@ -381,7 +381,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer test-token")
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
-		assertAPIError(t, rec, http.StatusBadRequest, "invalid_form", "上传格式不对，请重新选择图片。")
+		assertAPIError(t, rec, http.StatusBadRequest, "invalid_form", "上传格式不对")
 	})
 
 	extractCases := []struct {
@@ -390,12 +390,12 @@ func TestUploadFailureMessages(t *testing.T) {
 		code    string
 		message string
 	}{
-		{"timeout", &extract.Failure{Kind: extract.FailureTimeout, Detail: "context deadline exceeded"}, "extract_timeout", "识别超时，请稍后重试。"},
-		{"deadline", context.DeadlineExceeded, "extract_timeout", "识别超时，请稍后重试。"},
-		{"bad response", &extract.Failure{Kind: extract.FailureBadResponse, Detail: "model response JSON is invalid"}, "extract_bad_response", "识别结果无法解析，请重试。"},
-		{"provider", &extract.Failure{Kind: extract.FailureProvider, Provider: "qwen", Detail: "HTTP 502: " + secret + " " + strings.Repeat("Z", 3000)}, "extract_provider_error", "识别服务出错，请稍后重试。"},
-		{"not configured", &extract.Failure{Kind: extract.FailureNotConfigured, Detail: "vision API key or model is empty"}, "extract_not_configured", "识别服务未配置。"},
-		{"other", fmt.Errorf("exploded: %s %s", secret, strings.Repeat("Q", 3000)), "extract_failed", "识别失败，请稍后重试。"},
+		{"timeout", &extract.Failure{Kind: extract.FailureTimeout, Detail: "context deadline exceeded"}, "extract_timeout", "识别超时"},
+		{"deadline", context.DeadlineExceeded, "extract_timeout", "识别超时"},
+		{"bad response", &extract.Failure{Kind: extract.FailureBadResponse, Detail: "model response JSON is invalid"}, "extract_bad_response", "识别结果无法解析"},
+		{"provider", &extract.Failure{Kind: extract.FailureProvider, Provider: "qwen", Detail: "HTTP 502: " + secret + " " + strings.Repeat("Z", 3000)}, "extract_provider_error", "识别服务出错"},
+		{"not configured", &extract.Failure{Kind: extract.FailureNotConfigured, Detail: "vision API key or model is empty"}, "extract_not_configured", "识别服务未配置"},
+		{"other", fmt.Errorf("exploded: %s %s", secret, strings.Repeat("Q", 3000)), "extract_failed", "识别失败"},
 	}
 	for _, tc := range extractCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -424,7 +424,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		}}, 1<<20)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
-		assertAPIError(t, rec, http.StatusUnprocessableEntity, "missing_paid_at", "没识别出支付时间。")
+		assertAPIError(t, rec, http.StatusUnprocessableEntity, "missing_paid_at", "没识别出支付时间")
 	})
 
 	t.Run("negative amount", func(t *testing.T) {
@@ -433,7 +433,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		}}, 1<<20)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
-		assertAPIError(t, rec, http.StatusUnprocessableEntity, "negative_amount", "金额不能为负数。")
+		assertAPIError(t, rec, http.StatusUnprocessableEntity, "negative_amount", "金额不能为负数")
 	})
 
 	t.Run("empty notes", func(t *testing.T) {
@@ -447,7 +447,20 @@ func TestUploadFailureMessages(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
 		}
-		if body.IsBill || body.Reason != "这张图不是付款账单。" || body.Notes != "" {
+		if body.IsBill || body.Reason != "这张图不是付款账单" || body.Notes != "" {
+			t.Fatalf("%+v", body)
+		}
+	})
+
+	t.Run("notes cut at comma", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{IsBill: false, Notes: "聊天记录，不是付款账单。"}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Reason != "聊天记录" || strings.Contains(body.Reason, "。") || strings.Contains(body.Reason, "，") {
 			t.Fatalf("%+v", body)
 		}
 	})
@@ -487,7 +500,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
 		}
-		if body.Reason != "图片太小，未当作账单。" {
+		if body.Reason != "图片太小" {
 			t.Fatalf("%+v", body)
 		}
 	})
@@ -507,7 +520,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
-		assertAPIError(t, rec, http.StatusInternalServerError, "store_read_failed", "读取账单失败，请稍后重试。")
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_read_failed", "读取账单失败")
 		if strings.Contains(rec.Body.String(), "bills.db") || strings.Contains(rec.Body.String(), "sqlite") {
 			t.Fatalf("response leaked store error: %s", rec.Body.String())
 		}
@@ -530,7 +543,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		})
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
-		assertAPIError(t, rec, http.StatusInternalServerError, "image_save_failed", "保存图片失败，请稍后重试。")
+		assertAPIError(t, rec, http.StatusInternalServerError, "image_save_failed", "保存图片失败")
 		if strings.Contains(rec.Body.String(), "not-a-dir") {
 			t.Fatalf("response leaked path: %s", rec.Body.String())
 		}
@@ -558,7 +571,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		})
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
-		assertAPIError(t, rec, http.StatusInternalServerError, "store_write_failed", "保存账单失败，请稍后重试。")
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_write_failed", "保存账单失败")
 		if strings.Contains(rec.Body.String(), "blocked") {
 			t.Fatalf("response leaked insert error: %s", rec.Body.String())
 		}
@@ -570,7 +583,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/bills?limit=9999", nil)
 		req.Header.Set("Authorization", "Bearer test-token")
 		srv.Handler().ServeHTTP(rec, req)
-		assertAPIError(t, rec, http.StatusBadRequest, "bad_limit", "条数应为 1 到 500 的整数。")
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_limit", "条数应为 1 到 500 的整数")
 	})
 }
 
@@ -622,8 +635,8 @@ func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, co
 	if got.Error != code || got.Message != message {
 		t.Fatalf("got %+v want %s %s", got, code, message)
 	}
-	if strings.ContainsAny(got.Message, "\n\r") || utf8.RuneCountInString(got.Message) > 40 {
-		t.Fatalf("message not one short sentence: %q", got.Message)
+	if strings.ContainsAny(got.Message, "\n\r") || strings.Contains(got.Message, "，") || strings.Contains(got.Message, "。") || utf8.RuneCountInString(got.Message) > 40 {
+		t.Fatalf("message not a short phrase: %q", got.Message)
 	}
 	if !containsHan(got.Message) {
 		t.Fatalf("message has no Chinese: %q", got.Message)

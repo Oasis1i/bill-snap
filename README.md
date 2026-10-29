@@ -95,26 +95,26 @@ curl -sS "http://127.0.0.1:8080/api/v1/summary?from=2026-10-20&to=2026-10-26&cat
 | 500 | 读库、存图或写库失败 |
 | 502 | 抽取器失败（超时、结果无法解析、供应商报错，或 key / 模型没配好） |
 
-失败时响应固定是两字段。`error` 是稳定机器码，`message` 是给手机通知的一句中文，没有堆栈、密钥或供应商原文：
+失败时响应固定是两字段。`error` 是稳定机器码，`message` 是给手机通知的短中文短语：写到中文逗号为止，不加句号。没有堆栈、密钥或供应商原文：
 
 ```json
-{"error":"unauthorized","message":"未授权，请检查上传令牌。"}
+{"error":"unauthorized","message":"未授权"}
 ```
 
 ```json
-{"error":"image_too_large","message":"图片超过上传大小限制。"}
+{"error":"image_too_large","message":"图片超过上传大小限制"}
 ```
 
 ```json
-{"error":"extract_timeout","message":"识别超时，请稍后重试。"}
+{"error":"extract_timeout","message":"识别超时"}
 ```
 
 识别失败的 `error`：`extract_timeout`（超时）、`extract_bad_response`（结果无法解析）、`extract_provider_error`（供应商报错）、`extract_not_configured`（未配置）、`extract_failed`（其他）。供应商原文只进服务器日志，并会截断、去掉密钥。上传还会见到 `bad_image_type`、`empty_image`、`missing_image`、`invalid_form`、`missing_paid_at`、`negative_amount`、`store_read_failed`、`image_save_failed`、`store_write_failed`，`message` 都是一句中文。列表和汇总失败也是这个形状。
 
-不是账单时仍是 200。`reason` 是一句说明：模型没写 `notes` 时为「这张图不是付款账单。」；mock 的几条固定说明会翻成中文。`notes` 是抽取器原文（密钥样式的片段会抹掉），通知不要用它。
+不是账单时仍是 200。`reason` 同样是短短语：模型没写 `notes` 时为「这张图不是付款账单」；mock 的固定说明会收成「图片几乎是纯色」「图片太小」「图片无法解码」。模型原文里中文逗号之后的内容会被丢掉，句号也会去掉。`notes` 是抽取器原文（密钥样式的片段会抹掉），通知不要用它。
 
 ```json
-{"is_bill":false,"duplicate":false,"stored":false,"reason":"图片几乎是纯色，未当作账单。","notes":"image is nearly a solid color, so it was not treated as a receipt"}
+{"is_bill":false,"duplicate":false,"stored":false,"reason":"图片几乎是纯色","notes":"image is nearly a solid color, so it was not treated as a receipt"}
 ```
 
 快捷指令应把所有 2xx 当「请求被理解」，再看 `is_bill`，不要把「不是账单」当成网络错误。非 2xx 通知读 `message`；不是账单通知读 `reason`。
