@@ -12,7 +12,7 @@ This repository is the skeleton: the mock extractor works offline, and the 通�
 2. 抽取器判断是不是账单。不是账单就返回 JSON，**不插行、不留文件**。
 3. 是账单则按去重规则写入 SQLite。同一笔支付的第二张截图返回原来的那一行。
 4. `GET /api/v1/bills` 和 `GET /api/v1/summary` 按时间、分类查询。
-5. `cmd/mcp-server` 用同一份 SQLite 暴露 `list_bills` 和 `summarize_spend`，给 Nori / Coin 以后接入。
+5. 只读 MCP 用同一份 SQLite。本机是 `cmd/mcp-server`（stdio）。远程是主服务上的 `POST /mcp`，要单独的 `MCP_TOKEN`，没设就关闭。
 
 所有会碰到账单数据的 HTTP 接口都要 token。`/healthz` 不需要。
 
@@ -35,7 +35,8 @@ make run
 | --- | --- | --- |
 | `HTTP_ADDR` | `127.0.0.1:8080` | 只监听本机。手机走局域网时改成 `:8080` |
 | `PORT` | 空 | 没设 `HTTP_ADDR` 时，听 `:$PORT` |
-| `UPLOAD_TOKEN` | 空 | HTTP 必填。`Authorization: Bearer <token>` 或 `X-API-Token` |
+| `UPLOAD_TOKEN` | 空 | 上传和查询必填。`Authorization: Bearer <token>` 或 `X-API-Token` |
+| `MCP_TOKEN` | 空 | 只给 `POST /mcp`。`Authorization: Bearer <token>`。留空则该接口 404。不要和 `UPLOAD_TOKEN` 用同一个值 |
 | `DB_PATH` | `data/bills.db` | SQLite 文件，启动时创建 |
 | `UPLOAD_DIR` | `data/uploads` | 账单截图目录。非账单不会写到这里 |
 | `APP_TZ` | `Asia/Shanghai` | `YYYY-MM-DD` 查询按这个时区解释 |
@@ -220,7 +221,56 @@ Mock 的日期不是「今天」。查询用 2026 年，或用上传响应里的
 
 ## MCP
 
-和 HTTP 服务读同一个 SQLite 文件，stdio，一行一条 JSON-RPC（MCP `2024-11-05`，也认 `2025-03-26` 和 `2025-06-18`）。日志在 stderr。MCP **不校验** `UPLOAD_TOKEN`：能启动这个进程的人已经能读数据库文件。
+读和 HTTP 服务同一个 SQLite 文件。两套入口用同一份工具定义。协议版本认 `2025-06-18`、`2025-03-26`、`2024-11-05`。金额是元，两位小数字符串（`25.90`）。时间按 `APP_TZ`（默认 Asia/Shanghai）显示成 `YYYY-MM-DD HH:MM`。不返回截图路径，也不返回模型原文。
+
+工具都是只读的：
+
+- `list_bills`：按日期列出明细。`from`、`to` 必填，`YYYY-MM-DD`，含首尾。`category` 可选，必须是当前分类之一。`limit` 可选，默认 50，超过 200 按 200。返回 `id`、`paid_at`、`amount`、`category`、`merchant`、`note`。
+- `summarize_spend`：按日期汇总。`from`、`to` 必填。`group_by` 是 `category`（默认）或 `day`。`include_income` 默认 false，为 false 时不算 `工资`。返回总额 `amount`（元）、`count`、`groups`（每组有金额和笔数）。
+- `list_categories`：无参数，返回当前生效的分类。
+
+日期必须是 `YYYY-MM-DD`。开始晚于结束、跨度超过 366 天（含首尾）、分类不在列表里，都是工具结果里的 `isError: true`，正文是短中文，没有句号，也没有逗号后面的半句。未知分类会带上允许的列表。协议错误（解析失败、方法不存在）走 JSON-RPC `error`。
+
+### 远程：`POST /mcp`
+
+挂在主 HTTP 进程上，Streamable HTTP，无状态，不发 `Mcp-Session-Id`。普通 JSON 即可。只接受 `application/json`。`GET /mcp` 是 405。
+
+`MCP_TOKEN` 没设或是空字符串时，这个路径直接 404，不会匿名开放。设了之后只认 `Authorization: Bearer <MCP_TOKEN>`，不认 `X-API-Token`，也不认 `UPLOAD_TOKEN`。缺失或错误是 401。
+
+这个进程本身仍是 HTTP。公网 HTTPS 由前面的 nginx 终止，不在这里配证书。nginx 要把 `Authorization` 原样转给上游。
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8080/mcp" \
+  -H "Authorization: Bearer $MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+curl -sS -X POST "http://127.0.0.1:8080/mcp" \
+  -H "Authorization: Bearer $MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"summarize_spend","arguments":{"from":"2026-10-01","to":"2026-10-31"}}}'
+```
+
+Cursor 或其他支持远程 MCP 的客户端可以这样接（公网把地址换成 nginx 上的 `https://` 主机名）：
+
+```json
+{
+  "mcpServers": {
+    "bill-snap": {
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer <MCP_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+### 本机 stdio
+
+`cmd/mcp-server` 仍是一行一条 JSON-RPC。日志在 stderr。它**不校验** `UPLOAD_TOKEN` 或 `MCP_TOKEN`：能启动这个进程的人已经能读数据库文件。
 
 ```bash
 export DB_PATH=data/bills.db
@@ -229,11 +279,6 @@ go run ./cmd/mcp-server
 # 或
 make mcp
 ```
-
-工具：
-
-- `list_bills`：`from`、`to`、`category`、`limit`
-- `summarize_spend`：`from`、`to`、`category` → `count`、`totals`、`by_category`
 
 Nori / Coin 以后只要支持自定义 MCP stdio，配成类似这样即可（路径改成你机器上的绝对路径）。本仓库没有这两款助手的专用插件。
 
@@ -251,7 +296,7 @@ Nori / Coin 以后只要支持自定义 MCP stdio，配成类似这样即可（�
 }
 ```
 
-助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，`category` 填 `外卖`。`category` 的 schema 是当前生效的那份列表，不能填列表以外的词。
+助手问「这周外卖花了多少」时，应调用 `summarize_spend`，`from` / `to` 填本周日期，再看 `groups` 里的 `外卖`。默认不含工资。`list_bills` 的 `category` schema 是当前生效的那份列表，不能填列表以外的词。
 
 ## 部署（只是轮廓）
 
@@ -335,14 +380,16 @@ CRON_TZ=Asia/Shanghai
 - 截图是私人付款记录。没有不带鉴权的图片下载路由；文件只在服务器磁盘上。
 - 默认只听 `127.0.0.1`。改成 `:8080` 之前先换掉 `change-me`。
 - 不要把 `.env`、`data/` 或 API key 提交进 git。冷备份只上传 SQLite 快照。
-- MCP 是本机 stdio。不要把它无鉴权地转到网络上。
+- 远程 MCP 只在设置了 `MCP_TOKEN` 之后出现，并且只认这个 Bearer。不要把它和 `UPLOAD_TOKEN` 设成同一个值，也不要无鉴权地暴露 `POST /mcp`。
+- 本机 `cmd/mcp-server` 是 stdio，不校验 token。不要把它无鉴权地转到网络上；要走网络就用 `POST /mcp`。
 
 ## 目录
 
 ```text
-cmd/server/            HTTP API
+cmd/server/            HTTP API，含 POST /mcp
 cmd/mcp-server/        MCP stdio
 internal/api/          路由、鉴权、上传和查询
+internal/mcp/          MCP 工具、stdio 和 Streamable HTTP
 internal/store/        SQLite。schema 的嵌入副本
 internal/extract/      Extractor、mock、通义/豆包/智谱客户端
 internal/config/       环境变量和 .env

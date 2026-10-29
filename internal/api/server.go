@@ -3,9 +3,11 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Oasis1i/bill-snap/internal/extract"
+	"github.com/Oasis1i/bill-snap/internal/mcp"
 	"github.com/Oasis1i/bill-snap/internal/store"
 	"github.com/Oasis1i/bill-snap/internal/version"
 )
@@ -13,6 +15,7 @@ import (
 // Options configures the HTTP handlers.
 type Options struct {
 	Token          string
+	MCPToken       string
 	UploadDir      string
 	Location       *time.Location
 	Store          *store.Store
@@ -21,9 +24,10 @@ type Options struct {
 	Version        string
 }
 
-// Server serves health, upload, list, and summary routes.
+// Server serves health, upload, list, summary, and the remote MCP route.
 type Server struct {
 	token     string
+	mcpToken  string
 	uploadDir string
 	loc       *time.Location
 	store     *store.Store
@@ -49,6 +53,7 @@ func New(opts Options) *Server {
 	}
 	return &Server{
 		token:     opts.Token,
+		mcpToken:  strings.TrimSpace(opts.MCPToken),
 		uploadDir: opts.UploadDir,
 		loc:       opts.Location,
 		store:     opts.Store,
@@ -58,12 +63,14 @@ func New(opts Options) *Server {
 	}
 }
 
-// Handler is the public mux. /healthz is open. Bill routes require the token.
+// Handler is the public mux. /healthz is open. Bill routes require the upload
+// token. POST /mcp requires MCP_TOKEN and is 404 when that token is unset.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /api/v1/upload", s.withAuth(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/bills", s.withAuth(s.handleList))
 	mux.HandleFunc("GET /api/v1/summary", s.withAuth(s.handleSummary))
+	mux.Handle("/mcp", mcp.NewHandler(s.store, s.loc, s.mcpToken))
 	return recoverMiddleware(mux)
 }

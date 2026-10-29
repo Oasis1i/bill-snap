@@ -45,6 +45,25 @@ func TestLoadRequiresNothingForMCP(t *testing.T) {
 	if err := cfg.ValidateForServer(); err == nil {
 		t.Fatal("empty token should fail server validation")
 	}
+	if cfg.MCPToken != "" {
+		t.Fatalf("mcp token %q", cfg.MCPToken)
+	}
+}
+
+func TestLoadMCPToken(t *testing.T) {
+	t.Setenv("APP_TZ", "UTC")
+	t.Setenv("UPLOAD_TOKEN", "")
+	t.Setenv("MCP_TOKEN", "  remote-secret  ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPToken != "remote-secret" {
+		t.Fatalf("mcp token %q", cfg.MCPToken)
+	}
+	if err := cfg.ValidateForServer(); err == nil {
+		t.Fatal("mcp token does not replace UPLOAD_TOKEN")
+	}
 }
 
 func TestLoadCategories(t *testing.T) {

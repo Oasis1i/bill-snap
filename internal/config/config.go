@@ -13,10 +13,13 @@ import (
 )
 
 // Config is process configuration. The HTTP server requires UploadToken.
-// The MCP process needs the database path, time zone, and category list.
+// MCPToken gates POST /mcp. Empty disables that route. The stdio MCP process
+// does not read it. Both processes need the database path, time zone, and
+// category list.
 type Config struct {
 	HTTPAddr       string
 	UploadToken    string
+	MCPToken       string
 	DBPath         string
 	UploadDir      string
 	Timezone       string
@@ -58,6 +61,7 @@ func Load() (Config, error) {
 	return Config{
 		HTTPAddr:       httpAddr(),
 		UploadToken:    strings.TrimSpace(os.Getenv("UPLOAD_TOKEN")),
+		MCPToken:       strings.TrimSpace(os.Getenv("MCP_TOKEN")),
 		DBPath:         getenv("DB_PATH", "data/bills.db"),
 		UploadDir:      getenv("UPLOAD_DIR", "data/uploads"),
 		Timezone:       tz,
