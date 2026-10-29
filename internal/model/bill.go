@@ -6,6 +6,7 @@ package model
 // OrderNo is the normalized order or transaction number, or empty when the
 // screenshot did not show one. PaidAtDefaulted is true when PaidAt was filled
 // with the upload time because the model omitted it.
+// Category is one of Categories. Empty or unknown extractor output is 其他.
 type Bill struct {
 	ID              int64  `json:"id"`
 	AmountCents     int64  `json:"amount_cents"`

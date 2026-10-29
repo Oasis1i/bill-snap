@@ -26,6 +26,8 @@ const minBillSide = 64
 
 // catalog is the fixed demo set. The mock picks an entry from the image hash,
 // so the same bytes always produce the same merchant and category.
+// Each category is a member of model.Categories; the extractor does not
+// invent a label.
 var catalog = []struct {
 	Merchant string
 	Category string
@@ -99,7 +101,7 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 		AmountCents: cents,
 		Currency:    "CNY",
 		Merchant:    item.Merchant,
-		Category:    item.Category,
+		Category:    model.NormalizeCategory(item.Category),
 		PaidAt:      paid,
 		OrderNo:     orderNo,
 		Confidence:  0.99,

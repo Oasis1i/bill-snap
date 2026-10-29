@@ -124,32 +124,41 @@ func negotiate(client string) string {
 	}
 }
 
+func categoryProperty(desc string) map[string]any {
+	return map[string]any{
+		"type":        "string",
+		"enum":        model.Categories,
+		"description": desc,
+	}
+}
+
 func toolDefs() []map[string]any {
+	categoryDesc := "Exact match against the fixed category list, for example 外卖. Omit to include every category."
 	return []map[string]any{
 		{
 			"name":        "list_bills",
-			"description": "List stored receipt bills. Filter with from/to (YYYY-MM-DD in APP_TZ, or RFC3339) and category (exact match, for example 外卖).",
-			"inputSchema": json.RawMessage(`{
+			"description": "List stored receipt bills. Filter with from/to (YYYY-MM-DD in APP_TZ, or RFC3339) and category (exact match against the fixed list, for example 外卖).",
+			"inputSchema": map[string]any{
 				"type": "object",
-				"properties": {
-					"from": {"type": "string", "description": "Inclusive start. YYYY-MM-DD (APP_TZ) or RFC3339."},
-					"to": {"type": "string", "description": "Inclusive end. YYYY-MM-DD (APP_TZ) or RFC3339."},
-					"category": {"type": "string", "description": "Exact category match, for example 外卖."},
-					"limit": {"type": "integer", "description": "Max rows, 1-500. Default 100."}
-				}
-			}`),
+				"properties": map[string]any{
+					"from":     map[string]any{"type": "string", "description": "Inclusive start. YYYY-MM-DD (APP_TZ) or RFC3339."},
+					"to":       map[string]any{"type": "string", "description": "Inclusive end. YYYY-MM-DD (APP_TZ) or RFC3339."},
+					"category": categoryProperty(categoryDesc),
+					"limit":    map[string]any{"type": "integer", "description": "Max rows, 1-500. Default 100."},
+				},
+			},
 		},
 		{
 			"name":        "summarize_spend",
-			"description": "Sum spending and break it down by category. Use category 外卖 for questions like how much was spent on takeout this week.",
-			"inputSchema": json.RawMessage(`{
+			"description": "Sum spending and break it down by category. Use category 外卖 for questions like how much was spent on takeout this week. category must be one of the fixed labels.",
+			"inputSchema": map[string]any{
 				"type": "object",
-				"properties": {
-					"from": {"type": "string", "description": "Inclusive start. YYYY-MM-DD (APP_TZ) or RFC3339."},
-					"to": {"type": "string", "description": "Inclusive end. YYYY-MM-DD (APP_TZ) or RFC3339."},
-					"category": {"type": "string", "description": "Exact category match, for example 外卖."}
-				}
-			}`),
+				"properties": map[string]any{
+					"from":     map[string]any{"type": "string", "description": "Inclusive start. YYYY-MM-DD (APP_TZ) or RFC3339."},
+					"to":       map[string]any{"type": "string", "description": "Inclusive end. YYYY-MM-DD (APP_TZ) or RFC3339."},
+					"category": categoryProperty(categoryDesc),
+				},
+			},
 		},
 	}
 }

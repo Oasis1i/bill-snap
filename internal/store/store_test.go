@@ -123,6 +123,69 @@ func TestInsertDedupListSummary(t *testing.T) {
 	}
 }
 
+func TestInsertNormalizesCategory(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	paid := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		in, want string
+		hash     string
+		cents    int64
+	}{
+		{" 房租 ", "房租", strings.Repeat("e", 64), 100},
+		{"外卖配送", "其他", strings.Repeat("f", 64), 200},
+		{"", "其他", strings.Repeat("1", 64), 300},
+		{"外 卖", "其他", strings.Repeat("2", 64), 400},
+		{"waimai", "其他", strings.Repeat("3", 64), 500},
+	}
+	for _, tc := range cases {
+		b, dup, err := st.InsertBill(ctx, NewBill{
+			AmountCents: tc.cents,
+			Currency:    "CNY",
+			Merchant:    "店" + tc.hash[:4],
+			Category:    tc.in,
+			PaidAt:      paid,
+			ContentHash: tc.hash,
+		})
+		if err != nil || dup {
+			t.Fatalf("%q: %+v dup=%v err=%v", tc.in, b, dup, err)
+		}
+		if b.Category != tc.want {
+			t.Fatalf("%q: got %q want %q", tc.in, b.Category, tc.want)
+		}
+	}
+	other, err := st.List(ctx, ListFilter{Category: "其他"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 4 {
+		t.Fatalf("其他: %+v", other)
+	}
+	rent, err := st.List(ctx, ListFilter{Category: "房租"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rent) != 1 || rent[0].Category != "房租" {
+		t.Fatalf("房租: %+v", rent)
+	}
+	// A close variant is not stored as 外卖, and a query for 外卖 does not match it.
+	waimai, err := st.List(ctx, ListFilter{Category: "外卖"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(waimai) != 0 {
+		t.Fatalf("外卖: %+v", waimai)
+	}
+	// Unknown query text stays an exact filter. It is not rewritten to 其他.
+	miss, err := st.List(ctx, ListFilter{Category: "不存在"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss) != 0 {
+		t.Fatalf("不存在: %+v", miss)
+	}
+}
+
 func TestOpenDefaultsToShanghai(t *testing.T) {
 	st := openTest(t)
 	if st.loc == nil || st.loc.String() != "Asia/Shanghai" {
