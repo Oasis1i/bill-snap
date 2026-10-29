@@ -33,7 +33,9 @@ Schema:
 {"is_bill":true,"amount":"12.34","currency":"CNY","merchant":"","category":"外卖","paid_at":"2026-10-26T12:30:00+08:00","order_no":"","confidence":0.0,"notes":""}
 Rules:
 - is_bill is false when the image is not a payment receipt (chat, landscape, home screen, blank image). Leave amount empty in that case.
-- amount is major currency units, not cents. Example: 18.5 yuan is "18.50".
+- When is_bill is false, notes must be exactly one short Simplified Chinese phrase with no period and no comma. Choose one of: 聊天截图, 空白图片, 主屏幕截图, 风景照片, 这张图不是付款账单. Do not write English in notes.
+- When is_bill is true, leave notes empty. Do not describe the receipt in English.
+- amount is major currency units (yuan), not cents. Example: 18.5 yuan is "18.50". The phone shows this string directly and does not divide by 100.
 - paid_at is RFC3339 with a numeric offset when the receipt shows a time. Use YYYY-MM-DD when only a date is visible. Leave paid_at empty when no date or time is visible. Do not invent a time.
 - order_no is the payment's order or transaction number when one is visible (订单号, 交易单号, 商户单号, 订单编号, 交易号, 商户订单号). If several are visible, prefer 交易单号, then 订单号, then 商户单号. Copy the number as printed. Leave order_no empty when none is visible. Do not invent one.
 - category must match this schema exactly: ` + string(schema) + `. If you are unsure which label fits, use ` + model.CategoryOther + `. Do not invent a label, do not translate it, and do not return a close variant.

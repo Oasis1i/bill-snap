@@ -105,7 +105,6 @@ func (m *Mock) Extract(ctx context.Context, imageBytes []byte, mime string) (Res
 		PaidAt:      paid,
 		OrderNo:     orderNo,
 		Confidence:  0.99,
-		Notes:       "mock extractor: deterministic fields from sha256",
 	}
 	meta["is_bill"] = true
 	meta["amount"] = res.Amount

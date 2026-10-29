@@ -80,13 +80,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if !res.IsBill {
 		reason := notBillReason(res.Notes)
-		slog.Info("upload discarded", "reason", reason)
+		slog.Info("upload discarded", "reason", reason, "notes", redactSecrets(strings.TrimSpace(res.Notes)))
 		writeJSON(w, http.StatusOK, uploadResponse{
 			IsBill:      false,
 			Duplicate:   false,
 			Stored:      false,
 			Reason:      reason,
-			Notes:       redactSecrets(strings.TrimSpace(res.Notes)),
+			Notes:       reason,
 			ContentHash: hash,
 		})
 		return
@@ -116,7 +116,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_read_failed", msgStoreRead)
 		return
 	} else if found {
-		writeJSON(w, http.StatusOK, uploadResponse{IsBill: true, Duplicate: true, Stored: false, Bill: &existing})
+		shown := presentBill(existing)
+		writeJSON(w, http.StatusOK, uploadResponse{IsBill: true, Duplicate: true, Stored: false, Bill: &shown})
 		return
 	}
 
@@ -136,15 +137,40 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_write_failed", msgStoreWrite)
 		return
 	}
+	shown := presentBill(bill)
 	if dup {
 		if bill.ImagePath != path {
 			_ = os.Remove(path)
 		}
-		writeJSON(w, http.StatusOK, uploadResponse{IsBill: true, Duplicate: true, Stored: false, Bill: &bill})
+		writeJSON(w, http.StatusOK, uploadResponse{IsBill: true, Duplicate: true, Stored: false, Bill: &shown})
 		return
 	}
 	slog.Info("bill stored", "id", bill.ID, "category", bill.Category)
-	writeJSON(w, http.StatusCreated, uploadResponse{IsBill: true, Duplicate: false, Stored: true, Bill: &bill})
+	writeJSON(w, http.StatusCreated, uploadResponse{IsBill: true, Duplicate: false, Stored: true, Bill: &shown})
+}
+
+// presentBill is the bill object a phone reads. amount is yuan. Note and the
+// raw model payload are stripped of English before they leave the process.
+// amount_cents stays so older clients can still read fen. The database row
+// is unchanged.
+func presentBill(b model.Bill) model.Bill {
+	if b.Amount == "" {
+		b.Amount = model.FormatCents(b.AmountCents)
+	}
+	b.Note = phoneNote(b.Note)
+	b.RawModelJSON = ""
+	return b
+}
+
+func presentBills(bills []model.Bill) []model.Bill {
+	if len(bills) == 0 {
+		return bills
+	}
+	out := make([]model.Bill, len(bills))
+	for i := range bills {
+		out[i] = presentBill(bills[i])
+	}
+	return out
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +190,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		To:       to,
 		Category: cat,
 		Count:    len(bills),
-		Bills:    bills,
+		Bills:    presentBills(bills),
 	})
 }
 

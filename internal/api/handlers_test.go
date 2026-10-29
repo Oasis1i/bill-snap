@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/Oasis1i/bill-snap/internal/extract"
@@ -117,6 +116,16 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	if !created.IsBill || created.Duplicate || !created.Stored || created.Bill == nil || created.Bill.ID == 0 {
 		t.Fatalf("%+v", created)
 	}
+	yuan := fmt.Sprintf("%d.%02d", created.Bill.AmountCents/100, created.Bill.AmountCents%100)
+	if created.Bill.Amount != yuan || created.Bill.Category == "" {
+		t.Fatalf("yuan amount: %+v", created.Bill)
+	}
+	if created.Bill.Note != "" || created.Bill.RawModelJSON != "" || strings.Contains(createdRec.Body.String(), "mock extractor") {
+		t.Fatalf("english note leaked: %s", createdRec.Body.String())
+	}
+	if !strings.Contains(createdRec.Body.String(), `"amount":"`+yuan+`"`) {
+		t.Fatalf("amount field missing: %s", createdRec.Body.String())
+	}
 
 	dupRec := httptest.NewRecorder()
 	h.ServeHTTP(dupRec, uploadReq(t, "bill.png", noisy, "test-token", "x"))
@@ -130,6 +139,9 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	if !dup.Duplicate || dup.Stored || dup.Bill.ID != created.Bill.ID {
 		t.Fatalf("%+v", dup)
 	}
+	if dup.Bill.Amount != created.Bill.Amount || dup.Bill.Category != created.Bill.Category {
+		t.Fatalf("duplicate yuan: %+v", dup.Bill)
+	}
 
 	blankRec := httptest.NewRecorder()
 	h.ServeHTTP(blankRec, uploadReq(t, "blank.png", blank, "test-token", ""))
@@ -140,11 +152,11 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	if err := json.Unmarshal(blankRec.Body.Bytes(), &discarded); err != nil {
 		t.Fatal(err)
 	}
-	if discarded.IsBill || discarded.Stored || discarded.Reason != "图片几乎是纯色" {
+	if discarded.IsBill || discarded.Stored || discarded.Reason != "图片几乎是纯色" || discarded.Notes != discarded.Reason {
 		t.Fatalf("%+v", discarded)
 	}
-	if !strings.Contains(discarded.Notes, "solid") {
-		t.Fatalf("notes should keep the extractor text: %+v", discarded)
+	if asciiLetters.MatchString(discarded.Reason) || strings.Contains(blankRec.Body.String(), "solid") || strings.Contains(blankRec.Body.String(), "receipt") {
+		t.Fatalf("english reason leaked: %s", blankRec.Body.String())
 	}
 
 	entries, err := os.ReadDir(upload)
@@ -165,7 +177,11 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	var listed struct {
 		Count int `json:"count"`
 		Bills []struct {
-			ID int64 `json:"id"`
+			ID           int64  `json:"id"`
+			Amount       string `json:"amount"`
+			Note         string `json:"note"`
+			Category     string `json:"category"`
+			RawModelJSON string `json:"raw_model_json"`
 		} `json:"bills"`
 	}
 	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
@@ -173,6 +189,9 @@ func TestUploadQueryAndAuth(t *testing.T) {
 	}
 	if listed.Count != 1 || listed.Bills[0].ID != created.Bill.ID {
 		t.Fatalf("%+v", listed)
+	}
+	if listed.Bills[0].Amount != created.Bill.Amount || listed.Bills[0].Category != created.Bill.Category || listed.Bills[0].Note != "" || listed.Bills[0].RawModelJSON != "" {
+		t.Fatalf("list bill: %+v", listed.Bills[0])
 	}
 
 	sumRec := httptest.NewRecorder()
@@ -346,7 +365,7 @@ func TestUploadFailureMessages(t *testing.T) {
 		srv, _ := newTestServer(t)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, uploadReq(t, "note.txt", []byte("hello"), "test-token", ""))
-		assertAPIError(t, rec, http.StatusBadRequest, "bad_image_type", "只支持 png、jpeg 或 webp")
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_image_type", "图片格式不支持")
 	})
 
 	t.Run("empty image", func(t *testing.T) {
@@ -447,8 +466,11 @@ func TestUploadFailureMessages(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
 		}
-		if body.IsBill || body.Reason != "这张图不是付款账单" || body.Notes != "" {
+		if body.IsBill || body.Reason != "这张图不是付款账单" || body.Notes != body.Reason {
 			t.Fatalf("%+v", body)
+		}
+		if asciiLetters.MatchString(body.Reason) {
+			t.Fatalf("english reason: %+v", body)
 		}
 	})
 
@@ -480,11 +502,50 @@ func TestUploadFailureMessages(t *testing.T) {
 		if utf8.RuneCountInString(body.Reason) > reasonRunes+1 {
 			t.Fatalf("reason too long: %s", body.Reason)
 		}
-		if !strings.Contains(body.Reason, "聊天截图") || !strings.Contains(body.Reason, "[redacted]") {
+		if !strings.HasPrefix(body.Reason, "聊天截图") || body.Notes != body.Reason || asciiLetters.MatchString(body.Reason) {
 			t.Fatalf("%+v", body)
 		}
-		if strings.Contains(body.Notes, secret) || !strings.Contains(body.Notes, "[redacted]") || !strings.Contains(body.Notes, "聊天截图") {
-			t.Fatalf("notes should keep the extractor text without the key: %+v", body)
+		if !strings.Contains(body.Reason, "哈") || utf8.RuneCountInString(body.Reason) > reasonRunes+1 {
+			t.Fatalf("%+v", body)
+		}
+	})
+
+	t.Run("english screenshot reason", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{IsBill: false, Notes: "This is a screenshot, not a bill."}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Reason != "这张图不是付款账单" || body.Notes != body.Reason || asciiLetters.MatchString(body.Reason) {
+			t.Fatalf("%+v", body)
+		}
+		if strings.Contains(strings.ToLower(rec.Body.String()), "screenshot") {
+			t.Fatalf("english reason leaked: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("defaulted note is chinese", func(t *testing.T) {
+		srv := serverWith(t, fixedExtractor{res: extract.Result{
+			IsBill: true, AmountCents: 2590, Currency: "CNY", Merchant: "沙县小吃",
+			Category: "餐饮", PaidAt: time.Now(), PaidAtDefaulted: true,
+			Notes: "paid_at missing; defaulted to upload time",
+		}}, 1<<20)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, uploadReq(t, "a.png", noisy, "test-token", ""))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		var body uploadResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Bill == nil || body.Bill.Amount != "25.90" || body.Bill.Category != "餐饮" || body.Bill.Note != "未识别到支付时间" {
+			t.Fatalf("%+v", body.Bill)
+		}
+		if asciiLetters.MatchString(body.Bill.Note) || body.Bill.Merchant != "沙县小吃" {
+			t.Fatalf("note or merchant: %+v", body.Bill)
 		}
 	})
 
@@ -585,6 +646,15 @@ func TestUploadFailureMessages(t *testing.T) {
 		srv.Handler().ServeHTTP(rec, req)
 		assertAPIError(t, rec, http.StatusBadRequest, "bad_limit", "条数应为 1 到 500 的整数")
 	})
+
+	t.Run("bad date", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/bills?from=yesterday", nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		srv.Handler().ServeHTTP(rec, req)
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_date", "日期格式不对")
+	})
 }
 
 type errExtractor struct{ err error }
@@ -635,24 +705,15 @@ func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, co
 	if got.Error != code || got.Message != message {
 		t.Fatalf("got %+v want %s %s", got, code, message)
 	}
-	if strings.ContainsAny(got.Message, "\n\r") || strings.Contains(got.Message, "，") || strings.Contains(got.Message, "。") || utf8.RuneCountInString(got.Message) > 40 {
+	if strings.ContainsAny(got.Message, "\n\r") || strings.Contains(got.Message, "，") || strings.Contains(got.Message, "。") || strings.Contains(got.Message, ".") || utf8.RuneCountInString(got.Message) > 40 {
 		t.Fatalf("message not a short phrase: %q", got.Message)
 	}
-	if !containsHan(got.Message) {
-		t.Fatalf("message has no Chinese: %q", got.Message)
+	if !hasHan(got.Message) || asciiLetters.MatchString(got.Message) {
+		t.Fatalf("message is not short zh-Hans: %q", got.Message)
 	}
 	if strings.Contains(rec.Body.String(), `\u`) {
 		t.Fatalf("message was escaped: %s", rec.Body.String())
 	}
-}
-
-func containsHan(s string) bool {
-	for _, r := range s {
-		if unicode.Is(unicode.Han, r) {
-			return true
-		}
-	}
-	return false
 }
 
 func captureLog(t *testing.T) *bytes.Buffer {
